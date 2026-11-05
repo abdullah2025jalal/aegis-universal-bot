@@ -342,11 +342,13 @@ def render_create_service(render_token: str, owner_id: str, full_repo: str) -> s
         "branch": "main",
         "serviceDetails": {
             "env": "python",
+            "runtime": "python",
             "plan": "free",
             "region": "oregon",
-            "buildCommand": "pip install -r requirements.txt",
-            "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",
-            "envSpecificDetails": {},
+            "envSpecificDetails": {
+                "buildCommand": "pip install -r requirements.txt",
+                "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",
+            },
         },
     }
     resp = http_request("POST", f"{RENDER_API}/services", token=render_token, json_body=payload)
