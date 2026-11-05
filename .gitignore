@@ -1,0 +1,13 @@
+# --- Aegis-Universal :: never expose credentials or local state ---
+secrets.env
+.env
+.env.*
+*.sqlite3
+*.sqlite
+*.db
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.git/
+.DS_Store
