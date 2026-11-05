@@ -32,7 +32,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from config import SETTINGS, Settings
 from engine.execution import BybitClient
 from engine.position_manager import PositionManager
-from engine.risk_gates import RiskGates, SizingPlan
+from engine.risk_gates import RiskGates
 from engine.reconciler import Reconciler
 from engine.scanner import MarketSetup, Scanner
 from engine.state import StateStore
@@ -122,7 +122,6 @@ async def trade_pipeline(setup: MarketSetup) -> None:
                 "position_state": str(SHARED.get("position"))[:120],
                 "equity": f"${SHARED.get('equity', 0):.2f}",
             })
-        raise
 
 
 # ============================================================================

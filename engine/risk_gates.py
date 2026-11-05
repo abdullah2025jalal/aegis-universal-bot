@@ -53,12 +53,15 @@ class SizingPlan:
     orderLinkId: str
 
     def to_dict(self) -> Dict[str, Any]:
+        """Complete machine-readable plan consumed by the execution pipeline."""
         return {
             "side": self.side, "qty": self.qty, "entry": self.entry,
-            "sl": self.sl_price, "tp": self.tp_price,
-            "SL dist": f"${self.sl_distance:,.1f}", "TP dist": f"${self.tp_distance:,.1f}",
-            "Risk": f"${self.risk_usd:.2f}", "Margin Req": f"${self.required_margin:.2f}",
-            "Net R:R": f"{self.net_rr:.2f}",
+            "sl_price": self.sl_price, "tp_price": self.tp_price,
+            "sl_distance": self.sl_distance, "tp_distance": self.tp_distance,
+            "risk_usd": self.risk_usd, "required_margin": self.required_margin,
+            "available": self.available, "equity": self.equity,
+            "net_rr": self.net_rr, "atr": self.atr,
+            "orderLinkId": self.orderLinkId,
         }
 
 

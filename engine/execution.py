@@ -479,6 +479,12 @@ class BybitClient:
             raise BybitAPIError(19001, "SL attach unconfirmed within 3s", "audit.failsafe")
         except Exception:
             # Circuit breaker: flatten — under no circumstances leave unhedged exposure.
+            self.al.report("execution.audit", BybitAPIError(
+                19003, "position filled WITHOUT exchange-side stop-loss and trading-stop "
+                       "attach failed — executing EMERGENCY MARKET CLOSE (reduceOnly)",
+                "audit.failsafe"),
+                {"side": position.side, "size": position.size,
+                 "entry": position.avg_price, "mark_price": entry})
             try:
                 await self.market_close(position.side, position.size)
             except Exception:
