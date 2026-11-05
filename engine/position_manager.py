@@ -78,6 +78,10 @@ class PositionManager:
         self.shared["position"] = tracked
         return tracked
 
+    async def tick_once(self) -> None:
+        """Public single supervision tick (used by the CI one-shot hosting mode)."""
+        await self._tick()
+
     # ------------------------------------------------------------------
     # Daemon
     # ------------------------------------------------------------------

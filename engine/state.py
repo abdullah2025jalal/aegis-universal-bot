@@ -188,3 +188,113 @@ class StateStore:
             self._db.close()
         except Exception:
             pass
+
+
+class JsonStateStore:
+    """
+    File-backed state for ephemeral CI containers (GitHub Actions hosting mode).
+    Same public surface as StateStore; the trade journal is exchange-sourced
+    (no local ledger) and daily aggregates come straight from Bybit REST in the
+    risk gates. The file is committed back to the repository by the workflow
+    after each cycle, so kill-switch / pause / baseline windows survive restarts.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._data: Dict[str, Any] = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    self._data = json.load(fh)
+            except (json.JSONDecodeError, OSError):
+                self._data = {}
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        self._data[key] = value
+
+    def save(self) -> None:
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(self._data, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+
+    # ---------------- lifecycle semantics (mirror StateStore) ----------------
+
+    def utc_day(self) -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime())
+
+    def ensure_utc_day(self) -> Tuple[str, bool]:
+        today = self.utc_day()
+        if self.get("day") != today:
+            self.set("day", today)
+            return today, True
+        return today, False
+
+    def baseline_equity(self) -> Optional[float]:
+        v = self.get("baseline_equity")
+        return float(v) if v else None
+
+    def set_baseline_equity(self, equity: float) -> None:
+        self.set("baseline_equity", float(equity))
+
+    def kill_switch(self) -> bool:
+        return bool(self.get("kill_switch", False))
+
+    def set_kill_switch(self, value: bool, reason: str = "") -> None:
+        self.set("kill_switch", bool(value))
+        self.set("kill_switch_reason", reason if value and reason else "")
+
+    def last_trade_closed_ts(self) -> float:
+        return float(self.get("last_trade_closed_ts", 0.0) or 0.0)
+
+    def set_last_trade_closed_ts(self, ts: float) -> None:
+        self.set("last_trade_closed_ts", float(ts))
+
+    def pause_until(self) -> float:
+        return float(self.get("pause_until_ts", 0.0) or 0.0)
+
+    def set_pause_until(self, ts: float, reason: str = "") -> None:
+        self.set("pause_until_ts", float(ts))
+        self.set("pause_reason", reason)
+
+    def consecutive_losses(self) -> int:
+        return int(self.get("consecutive_losses", 0) or 0)
+
+    def set_consecutive_losses(self, n: int) -> None:
+        self.set("consecutive_losses", int(n))
+
+    def profit_lock_day(self) -> str:
+        return str(self.get("profit_lock_day", "") or "")
+
+    def set_profit_lock_day(self, day: str) -> None:
+        self.set("profit_lock_day", day)
+
+    def daily_realized_pnl(self) -> float:
+        return float(self.get("daily_realized_pnl", 0.0) or 0.0)
+
+    def add_daily_realized_pnl(self, pnl: float) -> None:
+        self.set("daily_realized_pnl", self.daily_realized_pnl() + float(pnl))
+
+    def count_daily_result(self, is_win: bool) -> None:
+        k = "daily_wins" if is_win else "daily_losses"
+        self.set(k, int(self.get(k, 0) or 0) + 1)
+
+    def set_digest_sent(self, day: str) -> None:
+        self.set("digest_sent", True)
+        self.set("digest_sent_day", day)
+
+    # ---------------- journal is exchange-sourced in CI mode ----------------
+
+    def journal_open(self, *args: Any, **kwargs: Any) -> Optional[int]:
+        return None
+
+    def journal_close(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def journal_day_stats(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return {"closed": 0, "wins": 0, "losses": 0, "pnl": 0.0, "win_rate": 0.0}
+
+    def close(self) -> None:
+        return None

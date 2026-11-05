@@ -189,9 +189,31 @@ class RiskGates:
     # G0 — Circuit Breaker & Preservation Gate
     # ------------------------------------------------------------------
 
+    async def _exchange_day_state(self) -> Dict[str, Any]:
+        """Authoritative UTC-day realized PnL / last close / loss streak, from Bybit."""
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        day_start_ms = int(datetime(now_utc.year, now_utc.month, now_utc.day,
+                                    tzinfo=timezone.utc).timestamp() * 1000)
+        rows: List[Dict[str, Any]] = []
+        try:
+            rows = await self.client.closed_pnl(day_start_ms)
+        except Exception as exc:  # noqa: BLE001 — degrade to state-store values
+            self.al.report("risk.closed_pnl", exc, {"gate": "G0"})
+        ordered = sorted(rows, key=lambda r: int(r.get("updatedTime") or 0))
+        realized = sum(float(r.get("closedPnl") or 0) for r in ordered)
+        last_ts = (int(ordered[-1].get("updatedTime") or 0) / 1000.0) if ordered else 0.0
+        consec = 0
+        for r in reversed(ordered):
+            if float(r.get("closedPnl") or 0) < 0:
+                consec += 1
+            else:
+                break
+        return {"realized": realized, "last_closed_ts": last_ts,
+                "consecutive_losses": consec, "count": len(ordered)}
+
     async def _g0(self, setup) -> GateOutcome:
         s = self.s
-        self.state.ensure_utc_day()
         now = time.time()
 
         if s.kill_switch_active or self.state.kill_switch():
@@ -220,47 +242,61 @@ class RiskGates:
             return GateOutcome("G0", False, "HARD HALT: equity preservation floor breached "
                                             f"(${equity:.2f} < ${baseline * s.equity_preservation_floor_pct:.2f})")
 
-        daily_pnl = self.state.daily_realized_pnl()
-        if daily_pnl <= 0 and abs(daily_pnl) >= equity * s.daily_loss_limit_pct:
-            pause_until = now + 24 * 3600
-            self.state.set_pause_until(pause_until, "daily loss limit")
+        day = await self._exchange_day_state()
+        self._ctx["g0_day"] = day
+        today = self.state.utc_day()
+
+        # Daily loss limit -> 24h entry halt (triggered once per UTC day)
+        if day["realized"] <= 0 and abs(day["realized"]) >= equity * s.daily_loss_limit_pct \
+                and self.state.get("day_loss_pause_day") != today:
+            self.state.set("day_loss_pause_day", today)
+            self.state.set_pause_until(now + 24 * 3600, "daily loss limit")
             self.al.enqueue(self.al.send_trade_event, "paused", {
                 "Trigger": f"Daily loss ≥ {s.daily_loss_limit_pct * 100:.0f}% of equity",
-                "Daily PnL": f"${daily_pnl:.4f}",
-                "Paused Until (UTC)": time.strftime("%Y-%m-%d %H:%M", time.gmtime(pause_until)),
+                "Daily PnL": f"${day['realized']:.4f} ({day['count']} closed trades)",
+                "Paused Until (UTC)": time.strftime("%Y-%m-%d %H:%M", time.gmtime(now + 24 * 3600)),
             })
-            return GateOutcome("G0", False, f"daily loss limit engaged (${daily_pnl:.4f})")
-
-        if daily_pnl >= equity * s.daily_profit_lock_pct and self.state.profit_lock_day() != self.state.utc_day():
-            self.state.set_profit_lock_day(self.state.utc_day())
-            self.al.enqueue(self.al.send_trade_event, "paused", {
-                "Trigger": f"Daily profit ≥ {s.daily_profit_lock_pct * 100:.0f}% of equity",
-                "Daily PnL": f"${daily_pnl:.4f}",
-                "Lock": "Entries locked until UTC 00:00",
-            })
-            return GateOutcome("G0", False, "profit lock engaged for the day")
+            return GateOutcome("G0", False, f"daily loss limit engaged (${day['realized']:.4f})")
 
         if self.state.pause_until() > now:
             remaining = self.state.pause_until() - now
             return GateOutcome("G0", False, f"entries paused for "
                                             f"{remaining / 60:.0f} min ({self.state.get('pause_reason', '')})")
 
-        if self.state.consecutive_losses() >= 4 and self.state.pause_until() <= now:
+        # Daily profit lock -> entries locked until UTC 00:00
+        if day["realized"] >= equity * s.daily_profit_lock_pct \
+                and self.state.profit_lock_day() != today:
+            self.state.set_profit_lock_day(today)
+            self.al.enqueue(self.al.send_trade_event, "paused", {
+                "Trigger": f"Daily profit ≥ {s.daily_profit_lock_pct * 100:.0f}% of equity",
+                "Daily PnL": f"${day['realized']:.4f} ({day['count']} closed trades)",
+                "Lock": "Entries locked until UTC 00:00",
+            })
+            return GateOutcome("G0", False, "profit lock engaged for the day")
+
+        # Loss-streak pause (>= 4 consecutive losses -> 4h), once per UTC day
+        streak_pause_day = self.state.get("streak_pause_day")
+        if day["consecutive_losses"] >= 4 and streak_pause_day != today \
+                and self.state.pause_until() <= now:
+            self.state.set("streak_pause_day", today)
             self.state.set_pause_until(now + 4 * 3600, "4 consecutive losses")
             self.al.enqueue(self.al.send_trade_event, "paused", {
-                "Trigger": f"{self.state.consecutive_losses()} consecutive losses",
+                "Trigger": f"{day['consecutive_losses']} consecutive losses",
                 "Paused Until (UTC)": time.strftime("%Y-%m-%d %H:%M", time.gmtime(now + 4 * 3600)),
             })
             return GateOutcome("G0", False, "loss-streak pause engaged (4h)")
 
-        return GateOutcome("G0", True, f"equity ${equity:.2f} / baseline ${baseline:.2f}")
+        return GateOutcome("G0", True,
+                           f"equity ${equity:.2f} baseline ${baseline:.2f} dayPnL ${day['realized']:.4f}")
 
     # ------------------------------------------------------------------
-    # G1 — Post-Trade Cooldown
+    # G1 — Post-Trade Cooldown (exchange-sourced close timestamp)
     # ------------------------------------------------------------------
 
     async def _g1(self, setup) -> GateOutcome:
-        last_closed = self.state.last_trade_closed_ts()
+        day = self._ctx.get("g0_day") or await self._exchange_day_state()
+        self.state.set_last_trade_closed_ts(day["last_closed_ts"] or self.state.last_trade_closed_ts())
+        last_closed = max(day["last_closed_ts"], self.state.last_trade_closed_ts())
         if last_closed <= 0:
             return GateOutcome("G1", True)
         elapsed = time.time() - last_closed

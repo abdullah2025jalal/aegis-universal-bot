@@ -1,0 +1,59 @@
+name: aegis-cycle
+
+# Aegis-Universal continuous engine hosting (GitHub Actions, 24/7):
+# one full trading-engine cycle per run, every 5 minutes (GitHub's
+# minimum schedule interval). Note: GitHub's scheduler is best-effort
+# and can run several minutes late under peak load; because SL/TP live
+# on the exchange inside each order, no gap can leave an unhedged
+# position. Every failure is emailed with a full stack trace.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: aegis-cycle
+  cancel-in-progress: false   # never kill an in-flight cycle; newest queued run supersedes
+
+permissions:
+  contents: write             # commit aegis_state.json back to the repo
+
+jobs:
+  trade-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --quiet --disable-pip-version-check -r requirements.txt
+
+      - name: Run Aegis engine cycle
+        env:
+          BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
+          BYBIT_API_SECRET: ${{ secrets.BYBIT_API_SECRET }}
+          BYBIT_TESTNET: ${{ secrets.BYBIT_TESTNET }}
+          BYBIT_SYMBOL: ${{ secrets.BYBIT_SYMBOL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+          ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
+          CI_SUPERVISE_SECONDS: "240"
+        run: python tools/ci_cycle.py
+
+      - name: Persist operator state (kill switch / baseline / telemetry)
+        run: |
+          git config user.name "aegis-ci"
+          git config user.email "aegis-ci@users.noreply.github.com"
+          git add aegis_state.json || true
+          if git diff --cached --quiet; then
+            echo "state unchanged — no commit"
+          else
+            git commit -m "chore(state): engine cycle telemetry @ $(date -u +%FT%TZ)"
+            git push
+          fi

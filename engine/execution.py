@@ -437,11 +437,14 @@ class BybitClient:
     # Closed PnL (journaling)
     # ------------------------------------------------------------------
 
-    async def closed_pnl(self, since_ms: int) -> List[Dict[str, Any]]:
-        result = await self._request(
-            "GET", "/v5/position/closed-pnl",
-            params={"category": self.s.bybit_category, "symbol": self.s.bybit_symbol,
-                    "startTime": int(since_ms), "limit": "20"})
+    async def closed_pnl(self, since_ms: int, until_ms: Optional[int] = None,
+                         limit: int = 200) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {
+            "category": self.s.bybit_category, "symbol": self.s.bybit_symbol,
+            "startTime": int(since_ms), "limit": str(limit)}
+        if until_ms is not None:
+            params["endTime"] = int(until_ms)
+        result = await self._request("GET", "/v5/position/closed-pnl", params=params)
         return result.get("list") or []
 
     # ------------------------------------------------------------------
