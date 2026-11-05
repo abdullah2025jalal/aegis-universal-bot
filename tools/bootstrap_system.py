@@ -166,6 +166,10 @@ def load_manifest() -> None:
         "github_repo": grab("GITHUB_REPO", "aegis-universal-bot"),
         "github_repo_private": True,
         "render_service_name": grab("RENDER_SERVICE_NAME", "aegis-universal-live"),
+        # Bybit hard-blocks US IPs (official: /v5 docs -> HTTP 403 for US);
+        # therefore the service MUST live in an EU/APAC region. Frankfurt
+        # (Germany) is stable and well-peered with Bybit mainnet.
+        "render_region": grab("RENDER_REGION", "frankfurt"),
         "uptimerobot_interval": int(grab("UPTIMEROBOT_INTERVAL", "300")),
         "uptimerobot_friendly_name": grab("UPTIMEROBOT_MONITOR_NAME", "Aegis-KeepAlive"),
         "dashboard_username": grab("DASHBOARD_USERNAME", "operator"),
@@ -332,7 +336,7 @@ def render_create_service(render_token: str, owner_id: str, full_repo: str) -> s
             print(f"    service exists (id={svc.get('id')}) — reusing")
             return svc.get("id")
 
-    log("    creating new Render Web Service (python / free / oregon)…")
+    log(f"    creating new Render Web Service (python / free / {MANIFEST['render_region']})…")
     payload = {
         "type": "web_service",
         "name": service_name,
@@ -344,7 +348,7 @@ def render_create_service(render_token: str, owner_id: str, full_repo: str) -> s
             "env": "python",
             "runtime": "python",
             "plan": "free",
-            "region": "oregon",
+            "region": MANIFEST["render_region"],
             "envSpecificDetails": {
                 "buildCommand": "pip install -r requirements.txt",
                 "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",
@@ -506,7 +510,7 @@ def bootstrap() -> None:
     banner("AEGIS-UNIVERSAL :: DEPLOYMENT COMPLETE — ALL SYSTEMS GREEN")
     print(f"""
   GITHUB REPOSITORY   : https://github.com/{full_repo}            (private, code pushed)
-  RENDER SERVICE      : {MANIFEST['render_service_name']}       (python / free / oregon, LIVE)
+  RENDER SERVICE      : {MANIFEST['render_service_name']}  ({MANIFEST['render_region']} / free, LIVE)
   APP URL             : {app_url}
   HEALTH ENDPOINT     : {app_url}/healthz/{MANIFEST['HEALTH_UUID']}
   UPTIMEROBOT MONITOR : name={MANIFEST['uptimerobot_friendly_name']} id={monitor_id} type=HTTP(s) interval={MANIFEST['uptimerobot_interval']}s  (stat=ok)

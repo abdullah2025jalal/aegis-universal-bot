@@ -1,15 +1,16 @@
 name: aegis-cycle
 
-# Aegis-Universal continuous engine hosting (GitHub Actions, 24/7):
-# one full trading-engine cycle per run, every 5 minutes (GitHub's
-# minimum schedule interval). Note: GitHub's scheduler is best-effort
-# and can run several minutes late under peak load; because SL/TP live
-# on the exchange inside each order, no gap can leave an unhedged
-# position. Every failure is emailed with a full stack trace.
+# Aegis-Universal :: diagnostics-only Action (hosting moved to Render).
+#
+# Production hosting runs on Render (Frankfurt/EU — Bybit hard-blocks US
+# IPs with HTTP 403, which makes every GitHub-hosted US runner useless
+# for trading). This workflow is therefore NOT scheduled anymore: it can
+# only be started manually (workflow_dispatch) to sanity-check the
+# engine packaging from a clean environment. SL/TP live on the exchange
+# inside each order, so no gap can leave an unhedged position. Every
+# failure is emailed with a full stack trace.
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:
