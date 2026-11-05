@@ -126,10 +126,10 @@ async def lifespan(_app: FastAPI):
     STATE = StateStore(s.state_db_path)
     CLIENT = BybitClient(s, ALERTER)
 
-    SCANNER = Scanner(CLIENT, ALERTER, s, on_setup=make_pipeline(
-        CLIENT, STATE, PMGR, ALERTER, SHARED, GATES))
     PMGR = PositionManager(CLIENT, STATE, ALERTER, s, SHARED)
     GATES = RiskGates(CLIENT, STATE, ALERTER, s, SHARED)
+    SCANNER = Scanner(CLIENT, ALERTER, s, on_setup=make_pipeline(
+        CLIENT, STATE, PMGR, ALERTER, SHARED, GATES))
     reconciler = Reconciler(CLIENT, STATE, ALERTER, s, PMGR, SCANNER)
 
     install_process_hooks(ALERTER)
