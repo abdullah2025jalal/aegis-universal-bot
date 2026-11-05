@@ -58,6 +58,7 @@ class Settings:
     bybit_api_key: str = ""
     bybit_api_secret: str = ""
     bybit_testnet: bool = False
+    bybit_demo: bool = False               # Demo Trade venue (api-demo.bybit.com) — documented deployer deviation
     bybit_symbol: str = "BTCUSDT"
     bybit_category: str = "linear"          # NEVER trade anything else (Never List #3)
     bybit_recv_window_ms: int = 10000
@@ -120,6 +121,8 @@ class Settings:
 
     @property
     def bybit_base_url(self) -> str:
+        if self.bybit_demo:
+            return "https://api-demo.bybit.com"
         return "https://api-testnet.bybit.com" if self.bybit_testnet else "https://api.bybit.com"
 
     @classmethod
@@ -131,6 +134,7 @@ class Settings:
             bybit_api_key=_env_str("BYBIT_API_KEY"),
             bybit_api_secret=_env_str("BYBIT_API_SECRET"),
             bybit_testnet=_env_bool("BYBIT_TESTNET", False),
+            bybit_demo=_env_bool("BYBIT_DEMO", False),
             bybit_symbol=_env_str("BYBIT_SYMBOL", "BTCUSDT") or "BTCUSDT",
             bybit_recv_window_ms=_env_int("BYBIT_RECV_WINDOW_MS", 10000),
             resend_api_key=_env_str("RESEND_API_KEY"),
