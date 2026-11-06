@@ -19,9 +19,10 @@ here AND by the exchange itself:
 
 Everything else that remains is pure mechanical plumbing required to
 reach and hold the market safely, not a condition on the AI:
-  * instrument min-lot clamp (Bybit rejects smaller sizes),
-  * the day-trader-skill exit discipline: ATR-clamped stop + 1.5R target
-    attached exchange-side, atomic with the entry (tpslMode Full),
+  * instrument min-lot determination (Bybit rejects smaller sizes),
+  * the operator's fixed ±$1 stake: an exchange-minimum order whose stop
+    loses ≈$1 net and whose target gains ≈$1 net (both attached
+    exchange-side, atomic with the entry, tpslMode Full),
   * the zero-naked-exposure audit (SL confirmed or emergency flat),
   * the ledger (journal + position adoption) and email alerts.
 """
@@ -29,46 +30,44 @@ reach and hold the market safely, not a condition on the AI:
 from __future__ import annotations
 
 import logging
-import math
 import time
 from typing import Any, Dict
 
 logger = logging.getLogger("aegis.direct")
 
 
-def plan_bracket(entry: float, atr: float, equity: float, spec, s,
-                 side: str) -> Dict[str, Any]:
-    """Exit-planner + budget formulary: qty from the max-loss budget,
-    SL/TP prices from the ATR clamp. Pure arithmetic (also used by
-    tools/smoke_test.py); the only feasibility clamp is the instrument's
-    own min lot (Bybit rejects anything smaller) — no pass/block verdicts."""
+def plan_bracket(entry: float, atr: float, spec, s, side: str) -> Dict[str, Any]:
+    """FIXED-$1 operator staking (directive 2026-11-06): the exchange-minimum
+    quantity is the deterministic stake; the stop and the target are placed so
+    that a stop-out loses ≈$1 NET and a target-out gains ≈$1 NET (round-trip
+    fees included):
+
+        net SL hit  =  -(sl_distance + fee_per_unit) * qty  =  -$1
+        net TP hit  =  +(tp_distance - fee_per_unit) * qty  =  +$1
+
+    If the market is unusually volatile the stop is honored at the 1.5*ATR
+    noise floor, which may widen the realized loss modestly beyond $1 —
+    honesty over fabrication. Pure arithmetic (also used by tools/smoke_test.py);
+    no pass/block verdicts here.
+    """
     spec = spec or type("S", (), {"qty_step": 0.001, "min_order_qty": 0.001,
                                   "max_order_qty": 100.0, "tick_size": 0.1})()
-    sl_distance = min(max(1.5 * atr, entry * s.min_sl_distance_pct),
-                      entry * s.max_sl_distance_pct)
-    tp_distance = s.target_gross_rr * sl_distance
-    risk_usd = equity * s.risk_per_trade_pct
+    qty = spec.min_order_qty                       # deterministic stake (0.001 BTC)
+    risk = float(getattr(s, "fixed_risk_per_trade_usd", 1.0) or 1.0)
     fee_per_unit = entry * s.round_trip_fee_rate
-    denom = sl_distance + fee_per_unit
-    if denom <= 0:
-        denom = max(denom, 1e-9)
-    step = max(spec.qty_step, 1e-12)
-    raw_qty = risk_usd / denom
-    qty = math.floor(raw_qty / step) * step
-    if qty < spec.min_order_qty:
-        qty = spec.min_order_qty          # min-lot accommodation (no cap by directive)
-    if spec.max_order_qty and qty > spec.max_order_qty:
-        qty = math.floor(spec.max_order_qty / step) * step
+    sl_distance = risk / qty - fee_per_unit
+    noise_floor = 1.5 * float(atr or 0.0)
+    if sl_distance < noise_floor:
+        sl_distance = noise_floor                  # stop beyond intrabar noise
+    tp_distance = risk / qty + fee_per_unit        # anchored to net +$1 regardless of SL
     if side == "Buy":
         sl_price, tp_price = entry - sl_distance, entry + tp_distance
     else:
         sl_price, tp_price = entry + sl_distance, entry - tp_distance
-    gross = s.target_gross_rr * sl_distance
-    net_rr = (gross - fee_per_unit) / (sl_distance + fee_per_unit)
     return {
         "qty": qty, "sl_price": sl_price, "tp_price": tp_price,
         "sl_distance": sl_distance, "tp_distance": tp_distance,
-        "risk_usd": risk_usd, "net_rr": net_rr,
+        "risk_usd": risk, "net_rr": 1.0,           # ±$1 after fees, by design
         "orderLinkId": f"aegis-uni-{int(time.time() * 1000)}",
     }
 
@@ -118,9 +117,7 @@ class DirectExecutor:
                 limit_price = cap_price                    # IOC fills at bid (better) when possible
 
             spec = await self.client.instrument()
-            equity, _available = await self.client.wallet_balance()
-            plan = plan_bracket(ref, float(setup.atr_15m), float(equity or 0.0),
-                                spec, self.s, side)
+            plan = plan_bracket(ref, float(setup.atr_15m), spec, self.s, side)
 
             order = await self.client.place_limit_ioc_bracket(
                 side=side, qty=float(plan["qty"]), price=limit_price,
@@ -151,9 +148,8 @@ class DirectExecutor:
                 "AI Ref Price": f"${ref:,.1f}",
                 "SL": f"${plan['sl_price']:,.1f}",
                 "TP": f"${plan['tp_price']:,.1f}",
-                "Risk $": f"${plan['risk_usd']:.2f}",
-                "Net R:R": f"{plan['net_rr']:.2f}",
-                "Mode": "Direct AI verdict — Limit-IOC $1 cap (tpsl Full)",
+                "Risk $ (fixed)": f"±${plan['risk_usd']:.2f} net (SL -$ / TP +$, fees incl.)",
+                "Mode": "Direct AI verdict — Limit-IOC $1 cap, fixed ±$1 stake (tpsl Full)",
                 "AI Setup": str(verdict.get("setup", "n/a")),
                 "AI Confidence": str(verdict.get("confidence", "")),
                 "AI Reason": str(verdict.get("reason", ""))[:140],

@@ -1,6 +1,5 @@
 """Offline smoke test: imports, execution-planner math, alerter dedupe — NO network, NO orders."""
 import asyncio
-import math
 import os
 import sys
 import tempfile
@@ -28,39 +27,39 @@ def main():
     atr = compute_atr_14(klines)
     assert approx(atr, 1.0), f"atr={atr}"
 
-    # SL clamp (as used inside plan_bracket): ATR small -> floor 0.5%
-    def clamp(entry, v):
-        return min(max(1.5 * v, entry * s.min_sl_distance_pct), entry * s.max_sl_distance_pct)
-    assert approx(clamp(100.0, 0.001), 0.5)
-    assert approx(clamp(100.0, 1.0), 1.5)   # 1.50*ATR inside band
-    assert approx(clamp(100.0, 1.5), 2.0)   # 1.5*ATR=2.25 -> ceiling 2%
-    assert approx(clamp(100.0, 5.0), 2.0)   # 1.5*5=7.5 -> ceiling 2%
-
+    # ---- FIXED ±$1 stakes (operator directive 2026-11-06) --------------
+    # plan_bracket now: qty=exchange minimum; SL nets ≈ -$1, TP nets ≈ +$1
+    # (fees included); the only widening force is the 1.5*ATR noise floor.
     specs = InstrumentSpec("BTCUSDT", tick_size=0.1, qty_step=0.001,
                            min_order_qty=0.001, max_order_qty=1000.0, max_leverage=100.0)
 
-    # $50,000 equity @ 65,000 entry, ATR=800 -> SL=1200 (1.85%, in band); risk 750 USD
-    equity, entry, atr_ok = 50_000.0, 65_000.0, 800.0
-    plan = plan_bracket(entry, atr_ok, equity, specs, s, "Buy")
-    sl_dist = 1.5 * atr_ok  # 1200 (1.85%) inside clamp
-    risk_usd = equity * 0.015  # 750
-    fee = entry * 0.0011  # 71.5
-    raw = risk_usd / (sl_dist + fee)
-    expect_qty = math.floor(raw / 0.001) * 0.001
-    assert approx(plan["qty"], expect_qty), (plan["qty"], expect_qty)
-    assert approx(plan["net_rr"], (s.target_gross_rr * sl_dist - fee) / (sl_dist + fee))
-    assert approx(plan["sl_price"], entry - sl_dist) and approx(plan["tp_price"], entry + 1.5 * sl_dist)
-    print(f"  sizing (Buy): qty={plan['qty']} SL=${plan['sl_price']} "
-          f"TP=${plan['tp_price']} netRR={plan['net_rr']:.3f}")
+    entry = 110_000.0                     # BTC example price
+    fee_u = entry * s.round_trip_fee_rate   # round-trip taker fee per BTC
+    plan = plan_bracket(entry, 300.0, specs, s, "Buy")
+    assert approx(plan["qty"], specs.min_order_qty), plan
+    assert approx(plan["sl_distance"], 1.0 / 0.001 - fee_u), plan["sl_distance"]
+    assert approx(plan["tp_distance"], 1.0 / 0.001 + fee_u), plan["tp_distance"]
+    assert approx(plan["sl_price"], entry - plan["sl_distance"])
+    assert approx(plan["tp_price"], entry + plan["tp_distance"])
+    # net P/L at the levels: SL = -$1 and TP = +$1, fees included
+    assert approx((plan["sl_distance"] + fee_u) * 0.001, 1.0)
+    assert approx((plan["tp_distance"] - fee_u) * 0.001, 1.0)
+    print(f"  fixed stake (Buy): SL=${plan['sl_price']:,.1f} TP=${plan['tp_price']:,.1f} "
+          f"(distances ${plan['sl_distance']:,.1f} / ${plan['tp_distance']:,.1f})")
 
-    # min-lot accommodation: small equity floors up to the exchange minimum
-    plan_small = plan_bracket(entry, 300.0, 20.0, specs, s, "Sell")
-    assert approx(plan_small["qty"], specs.min_order_qty), plan_small
-    assert approx(plan_small["sl_price"], entry + min(max(450.0, entry * 0.005), entry * 0.02))
-    assert approx(plan_small["tp_price"], entry - 1.5 * min(max(450.0, entry * 0.005), entry * 0.02))
+    plan_sell = plan_bracket(entry, 300.0, specs, s, "Sell")
+    assert approx(plan_sell["sl_price"], entry + plan_sell["sl_distance"])
+    assert approx(plan_sell["tp_price"], entry - plan_sell["tp_distance"])
 
-    # $1 execution cap constants present (operator rule)
+    # noise floor: unusually high ATR widens the stop past the $1 target
+    # (honest edge case — realized loss may exceed $1 modestly)
+    plan_big = plan_bracket(entry, 800.0, specs, s, "Buy")
+    assert approx(plan_big["sl_distance"], 1200.0)
+    assert approx(plan_big["tp_distance"], 1.0 / 0.001 + fee_u)  # TP still nets +$1
+
+    # $1 execution cap constants present (operator rules)
     assert s.ai_max_price_deviation_usd >= 0.0
+    assert approx(s.fixed_risk_per_trade_usd, 1.0)
 
     # formatting helpers
     assert fmt_price(72140.51, 0.1) == "72140.5"

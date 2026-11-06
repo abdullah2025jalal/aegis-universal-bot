@@ -129,6 +129,9 @@ class Settings:
     ai_max_price_deviation_usd: float = 1.0               # THE operator execution rule:
                                                           # never fill more than $1 away
                                                           # from the AI decision price
+    fixed_risk_per_trade_usd: float = 1.0                 # operator directive 2026-11-06:
+                                                          # every trade nets ±$1 (stop loses
+                                                          # ≈$1 after fees, target gains ≈$1)
 
     # ------------------------------------------------------------------
     # Error telemetry anti-spam
@@ -185,6 +188,7 @@ class Settings:
             ai_calls_per_key=_env_int("AI_CALLS_PER_KEY", 8),
             ai_state_path=_env_str("AI_STATE_PATH", "ai_state.json") or "ai_state.json",
             ai_max_price_deviation_usd=_env_float("AI_MAX_PRICE_DEVIATION_USD", 1.0),
+            fixed_risk_per_trade_usd=_env_float("FIXED_RISK_PER_TRADE_USD", 1.0),
         )
         return s
 

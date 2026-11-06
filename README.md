@@ -26,9 +26,14 @@ tools/
 ```
 
 **Operator mode (2026-11-06):** the AI verdict executes directly — no risk gates,
-no cooldowns, no loss limits. The single operator condition: execution never
-happens at a price more than $1 away from the AI decision price (Limit-IOC caps;
-a drift beyond the cap expires the order with zero exposure).
+no cooldowns, no loss limits. Operator rules: (1) execution never happens at a
+price more than $1 away from the AI decision price (Limit-IOC caps; drift
+beyond the cap expires the order with zero exposure); (2) every trade stakes a
+FIXED ±$1 — the exchange-minimum quantity with a stop that nets ≈ −$1 and a
+target that nets ≈ +$1 (fees included; a 1.5×ATR noise floor may widen the
+realized loss modestly in unusually volatile markets). The decision prompt is
+decisive: BUY/SELL the moment a confirmed closed-bar setup matches; HOLD only
+when literally no setup matches.
 
 ## Local run
 
