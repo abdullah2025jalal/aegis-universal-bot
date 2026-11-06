@@ -107,14 +107,19 @@ class DirectExecutor:
                     return (f"SKIP (operator $1 rule): AI decided ${ref:,.1f}; "
                             f"ask ${ask:,.1f} is ${ask - ref:,.2f} higher — more than "
                             f"the ${cap:g} cap (${cap_price:,.1f}). No purchase.")
-                limit_price = cap_price                    # IOC fills at ask (better) when possible
+                # ZERO-DRIFT entry: pin the order to the live best ask, so the
+                # fill happens AT the observed market (never above the operator
+                # cap; a collapse before the IOC match simply cancels).
+                limit_price = min(ask, cap_price)
             else:
                 cap_price = ref - cap
                 if bid < cap_price:
                     return (f"SKIP (operator $1 rule): AI decided ${ref:,.1f}; "
                             f"bid ${bid:,.1f} is ${ref - bid:,.2f} lower — more than "
                             f"the ${cap:g} cap (${cap_price:,.1f}). No sale.")
-                limit_price = cap_price                    # IOC fills at bid (better) when possible
+                # ZERO-DRIFT entry: pin to the live best bid — fills at the
+                # observed market, never below the operator cap.
+                limit_price = max(bid, cap_price)
 
             spec = await self.client.instrument()
             plan = plan_bracket(ref, float(setup.atr_15m), spec, self.s, side)
