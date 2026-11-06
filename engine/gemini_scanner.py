@@ -19,13 +19,18 @@ Playbook mapping for a 24/7 crypto session (BTC/USDT linear perp only):
   risk     -> G0-G9 remain the single authority. The AI verdict only
               proposes a direction; every gate may veto it.
 
-Key rotation (AI Studio free tier survival matrix, user-specified):
+Key & model rotation (AI Studio free tier survival matrix, user-specified):
   5 keys x AI_CALLS_PER_KEY calls (8) -> key#1(8) #2(8) #3(8) #4(8) #5(8)
   -> loop to #1 forever; persisted in AI_STATE_PATH JSON (atomic rename):
   counter_total / key_index / calls_current / decision-history tail.
-  Exactly one request per tick; a failed request still consumes its
-  counter slot (no amplification); the next tick continues the sequence.
-  The reconciler boot drill also counts as one real call.
+  Model chain: the primary model (gemini-3.8-flash) is attempted first
+  every cycle; on failure the chain descends GEMINI_FALLBACK_MODELS
+  (e.g. 3.7-flash -> 3.5-flash) inside the same cycle — exactly one
+  counted attempt per candidate, and ANY attempt (success or failure)
+  consumes one rotation slot (no amplification). The first success
+  wins, and the model that produced the verdict is recorded by name
+  and surfaced in the consensus/status reports. The reconciler boot
+  drill also counts as one real call.
 
 Latency: end-to-end decision latency (data -> verdict, ms) is measured,
 persisted and surfaced on the status reports; the model additionally
@@ -44,7 +49,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -135,14 +140,14 @@ class _RotationState:
         """Reserve the current key slot for this request attempt."""
         return self.d["key_index"] % max(1, len(self.keys))
 
-    def advance_after_call(self, ok: bool, **kv: Any) -> None:
+    def advance_after_call(self) -> None:
         """Count this attempt (a failure still consumes its slot, no retries)."""
         self.d["calls_current"] += 1
         self.d["counter_total"] += 1
         if self.d["calls_current"] >= self.calls_per_key:
             self.d["key_index"] = (self.d["key_index"] + 1) % max(1, len(self.keys))
             self.d["calls_current"] = 0
-        self.record(ok=ok, **kv)
+        self._save()
 
     def record(self, **kv: Any) -> None:
         self.d["history"] = [{"ts": round(time.time(), 1), **kv}] + self.d["history"]
@@ -165,7 +170,7 @@ class GeminiScanner:
         self._task: Optional[asyncio.Task] = None
         self.shared: Dict[str, Any] = {
             "last_scan_ts": 0.0, "consensus": "", "error": "",
-            "ai_latency_ms": 0.0, "last_action": "n/a",
+            "ai_latency_ms": 0.0, "last_action": "n/a", "last_model": "",
         }
 
     # ------------------------------------------------------------------
@@ -222,27 +227,21 @@ class GeminiScanner:
     async def tick(self) -> str:
         ctx = await self._collect()
         t0 = time.time()
-        key_idx = self.rot.begin_call()
-        verdict = await self._ask_gemini(ctx["features"], key_idx)
+        verdict, model_used, key_idx = await self._ask_gemini(ctx["features"])
         ai_ms = (time.time() - t0) * 1000.0
 
         action = str(verdict.get("action", "HOLD")).upper()
         status = str(verdict.get("status", "expired")).upper()
         tradable = action in ("BUY", "SELL") and status == "TRIGGERED"
 
-        self.rot.advance_after_call(
-            ok=True, action=action, status=status,
-            conf=verdict.get("confidence"), setup=verdict.get("setup"),
-            ai_ms=round(ai_ms), key=key_idx + 1,
-            reason=str(verdict.get("reason", ""))[:180])
-
         self.shared["ai_latency_ms"] = round(ai_ms)
         self.shared["last_action"] = action
+        self.shared["last_model"] = model_used
         self.shared["consensus"] = (
             f"AI={action} {status.lower()} conf={verdict.get('confidence')} "
             f"setup={verdict.get('setup')} valid={verdict.get('valid_minutes')}m "
             f"1h={verdict.get('trend_1h')} lat={round(ai_ms)}ms "
-            f"key#{key_idx + 1}/5 call#{self.rot.d['counter_total']}")
+            f"model={model_used} key#{key_idx + 1}/5 call#{self.rot.d['counter_total']}")
         self.shared["last_scan_ts"] = time.time()
         self.shared["error"] = ""
 
@@ -337,10 +336,42 @@ class GeminiScanner:
         }
 
     # ------------------------------------------------------------------
-    # Gemini call (AI Studio API) — one attempt per tick, no retries
+    # Gemini call (AI Studio API) — model fallback chain; every attempt
+    # (success or failure) consumes one rotation slot, no amplification
     # ------------------------------------------------------------------
 
-    async def _ask_gemini(self, features: Dict[str, Any], key_idx: int) -> Dict[str, Any]:
+    async def _ask_gemini(self, features: Dict[str, Any]) -> Tuple[Dict[str, Any], str, int]:
+        """Model fallback chain: primary first every cycle, then fallbacks.
+
+        Each candidate gets exactly one counted attempt with the current
+        rotation slot; the next candidate in the same cycle picks up the
+        following slot. The first successful verdict wins; the model that
+        produced it is returned for transparent telemetry.
+        """
+        candidates = [self.s.gemini_model] + list(self.s.gemini_fallback_models)
+        last_exc: Optional[Exception] = None
+        for model in candidates:
+            key_idx = self.rot.begin_call()
+            try:
+                verdict = await self._call_model(model, key_idx, features)
+            except Exception as exc:  # noqa: BLE001 — descend to next model
+                last_exc = exc
+                continue
+            return verdict, model, key_idx
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("no gemini candidates configured")
+
+    async def _call_model(self, model: str, key_idx: int,
+                          features: Dict[str, Any]) -> Dict[str, Any]:
+        """One counted attempt (candidate model + current rotation key).
+
+        The rotation slot is consumed on every exit path (transport error,
+        HTTP error, malformed envelope, unparseable verdict, success) —
+        a failure never triggers a retry on the same slot (no request
+        amplification); the slot the next attempt picks reflects exactly
+        the sequential 5-key rotation matrix.
+        """
         headers = {
             "x-goog-api-key": self.s.gemini_api_keys[key_idx],
             "Content-Type": "application/json",
@@ -354,28 +385,38 @@ class GeminiScanner:
                 "responseMimeType": "application/json",
             },
         }
-        url = f"{_GEMINI_URL}/{self.s.gemini_model}:generateContent"
+        url = f"{_GEMINI_URL}/{model}:generateContent"
         try:
             async with httpx.AsyncClient(timeout=self.s.ai_call_timeout_seconds) as cli:
                 resp = await cli.post(url, json=payload, headers=headers)
         except Exception as exc:  # transport failure — slot consumed, no retry
-            self.rot.advance_after_call(ok=False, key=key_idx + 1,
-                                        error=f"transport {type(exc).__name__}")
+            self.rot.advance_after_call()
+            self.rot.record(ok=False, model=model, key=key_idx + 1,
+                            error=f"transport {type(exc).__name__}")
             raise
         if resp.status_code != 200:
-            self.rot.advance_after_call(ok=False, key=key_idx + 1,
-                                        error=f"HTTP {resp.status_code}: {resp.text[:160]}")
+            self.rot.advance_after_call()
+            self.rot.record(ok=False, model=model, key=key_idx + 1,
+                            error=f"HTTP {resp.status_code}: {resp.text[:160]}")
             raise RuntimeError(
                 f"Gemini HTTP {resp.status_code}: {resp.text[:200]}")
         try:
             text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, ValueError) as exc:
-            self.rot.advance_after_call(ok=False, key=key_idx + 1, error="malformed envelope")
+            self.rot.advance_after_call()
+            self.rot.record(ok=False, model=model, key=key_idx + 1,
+                            error="malformed envelope")
             raise RuntimeError("gemini response missing candidate text") from exc
         verdict = self._parse_verdict(text)
         if verdict is None:
-            self.rot.advance_after_call(ok=False, key=key_idx + 1, error="unparseable verdict")
+            self.rot.advance_after_call()
+            self.rot.record(ok=False, model=model, key=key_idx + 1,
+                            error="unparseable verdict")
             raise RuntimeError(f"gemini verdict not JSON: {text[:160]}")
+        self.rot.advance_after_call()
+        self.rot.record(ok=True, model=model, key=key_idx + 1,
+                        action=verdict.get("action"), status=verdict.get("status"),
+                        conf=verdict.get("confidence"), setup=verdict.get("setup"))
         return verdict
 
     @staticmethod

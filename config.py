@@ -121,6 +121,7 @@ class Settings:
     gemini_enabled: bool = True
     gemini_api_keys: List[str] = field(default_factory=list)
     gemini_model: str = "gemini-3.8-flash"
+    gemini_fallback_models: List[str] = field(default_factory=list)  # 503 demand chain
     ai_scan_interval_seconds: int = 900                   # 15-minute decision cadence
     ai_call_timeout_seconds: int = 45
     ai_calls_per_key: int = 8                             # rotate keys every N calls
@@ -173,6 +174,9 @@ class Settings:
                 k.strip() for k in _env_str("GEMINI_API_KEYS").replace("\n", ",").split(",")
                 if k.strip()],
             gemini_model=_env_str("GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash",
+            gemini_fallback_models=[
+                m.strip() for m in _env_str("GEMINI_FALLBACK_MODELS").replace("\n", ",").split(",")
+                if m.strip()],
             ai_scan_interval_seconds=_env_int("AI_SCAN_INTERVAL_SECONDS", 900),
             ai_call_timeout_seconds=_env_int("AI_CALL_TIMEOUT_SECONDS", 45),
             ai_calls_per_key=_env_int("AI_CALLS_PER_KEY", 8),
