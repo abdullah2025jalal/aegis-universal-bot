@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass, field
+from typing import List
 
 
 def _env_str(name: str, default: str = "") -> str:
@@ -115,6 +116,17 @@ class Settings:
     clock_resync_seconds: int = 900                       # Periodic server-time resync
 
     # ------------------------------------------------------------------
+    # Gemini AI decision feed (tradingview-ta replacement, user-directed)
+    # ------------------------------------------------------------------
+    gemini_enabled: bool = True
+    gemini_api_keys: List[str] = field(default_factory=list)
+    gemini_model: str = "gemini-3.8-flash"
+    ai_scan_interval_seconds: int = 900                   # 15-minute decision cadence
+    ai_call_timeout_seconds: int = 45
+    ai_calls_per_key: int = 8                             # rotate keys every N calls
+    ai_state_path: str = "ai_state.json"                  # rotation + verdicts persistence
+
+    # ------------------------------------------------------------------
     # Error telemetry anti-spam
     # ------------------------------------------------------------------
     error_dedupe_window_seconds: int = 900                # 15 minutes
@@ -156,6 +168,15 @@ class Settings:
             position_poll_seconds=_env_int("POSITION_POLL_SECONDS", 15),
             state_db_path=_env_str("STATE_DB_PATH", "aegis_state.sqlite3") or "aegis_state.sqlite3",
             error_dedupe_window_seconds=_env_int("ERROR_DEDUPE_WINDOW_SECONDS", 900),
+            gemini_enabled=_env_bool("GEMINI_FEED", True),
+            gemini_api_keys=[
+                k.strip() for k in _env_str("GEMINI_API_KEYS").replace("\n", ",").split(",")
+                if k.strip()],
+            gemini_model=_env_str("GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash",
+            ai_scan_interval_seconds=_env_int("AI_SCAN_INTERVAL_SECONDS", 900),
+            ai_call_timeout_seconds=_env_int("AI_CALL_TIMEOUT_SECONDS", 45),
+            ai_calls_per_key=_env_int("AI_CALLS_PER_KEY", 8),
+            ai_state_path=_env_str("AI_STATE_PATH", "ai_state.json") or "ai_state.json",
         )
         return s
 

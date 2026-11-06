@@ -8,7 +8,7 @@ Contract Section 8.1: the exchange is the master ledger. On every boot:
   3. Verify attached stop-loss; if missing apply a conservative 1.0% SL.
      (Audit ladder in execution.py escalates to emergency close if unconfirmed.)
   4. Validate One-Way mode / ISOLATED margin / MAX_LEVERAGE (fail-closed).
-  5. Drill the tradingview-ta data feed.
+  5. Drill the AI decision feed (one real, counted Gemini call).
   6. Initialize baseline equity for the preservation floor.
 
 Every anomaly is appended to the boot report which drives the Section 9.1
@@ -115,13 +115,13 @@ class Reconciler:
                 summary["baseline_initialized"] = True
             summary["baseline"] = self.state.baseline_equity()
 
-        # 7) tradingview-ta drill
+        # 7) AI decision feed drill (Bybit klines + gemini-3.8-flash)
         try:
             consensus = await self.scanner.probe()
             summary["tv_consensus"] = consensus
         except Exception as exc:
-            self.al.report("reconciler.boot", exc, {"step": "tradingview_probe"})
-            errors.append(f"tradingview-ta test query failed: {type(exc).__name__}: {exc}")
+            self.al.report("reconciler.boot", exc, {"step": "ai_feed_probe"})
+            errors.append(f"AI decision feed test query failed: {type(exc).__name__}: {exc}")
 
         summary["ok"] = not errors
         return summary

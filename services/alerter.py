@@ -320,7 +320,8 @@ class Alerter:
                 "padding:12px 14px;color:#d1fae5;font-size:13px;'>"
                 "✅ All pre-flight gates passed with zero errors: Bybit authentication &amp; clock sync, "
                 "wallet equity verification, position/leverage validation (One-Way, Isolated, "
-                f"{ctx.get('leverage', '?')}x), and tradingview-ta test query." "</div>"))
+                f"{ctx.get('leverage', '?')}x), and the AI decision feed probe (Bybit klines + "
+                f"{ctx.get('model', 'gemini')})." "</div>"))
         await self.send_html(
             "🟢 [ONLINE] Aegis-Universal Successfully Booted & Operating Flawlessly", body)
 

@@ -297,6 +297,15 @@ class BybitClient:
             signed=False)
         return result.get("list") or []
 
+    async def klines(self, interval: str, limit: int = 20) -> List[List[str]]:
+        """Generic public kline fetch (raw newest-first rows; GemAI feed sorts)."""
+        result = await self._request(
+            "GET", "/v5/market/kline",
+            params={"category": self.s.bybit_category, "symbol": self.s.bybit_symbol,
+                    "interval": interval, "limit": str(limit), "invert": "false"},
+            signed=False)
+        return result.get("list") or []
+
     async def positions(self) -> List[PositionRecord]:
         result = await self._request(
             "GET", "/v5/position/list",

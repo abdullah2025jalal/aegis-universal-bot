@@ -172,8 +172,14 @@ async def lifespan(_app: FastAPI):
 
     PMGR = PositionManager(CLIENT, STATE, ALERTER, s, SHARED)
     GATES = RiskGates(CLIENT, STATE, ALERTER, s, SHARED)
-    SCANNER = Scanner(CLIENT, ALERTER, s, on_setup=make_pipeline(
-        CLIENT, STATE, PMGR, ALERTER, SHARED, GATES))
+    pipeline = make_pipeline(CLIENT, STATE, PMGR, ALERTER, SHARED, GATES)
+    if s.gemini_enabled:
+        from engine.gemini_scanner import GeminiScanner
+        logger.info("decision feed: Gemini (%s) every %ss — tradingview ignored",
+                    s.gemini_model, s.ai_scan_interval_seconds)
+        SCANNER = GeminiScanner(CLIENT, ALERTER, s, on_setup=pipeline)
+    else:
+        SCANNER = Scanner(CLIENT, ALERTER, s, on_setup=pipeline)
     reconciler = Reconciler(CLIENT, STATE, ALERTER, s, PMGR, SCANNER)
 
     install_process_hooks(ALERTER)
@@ -211,6 +217,7 @@ async def lifespan(_app: FastAPI):
                 "risk_pct": s.risk_per_trade_pct,
                 "margin_alloc_pct": s.max_margin_alloc_pct,
                 "symbol": s.bybit_symbol,
+                "model": s.gemini_model,
                 "dashboard_url": dash_url,
                 "health_url": health_url,
             })
