@@ -362,7 +362,8 @@ class Alerter:
     async def send_trade_event(self, kind: str, ctx: Dict[str, Any]) -> None:
         if kind == "open":
             title, sub, color = "NEW POSITION ENTERED", "Atomic Limit-IOC bracket live on exchange", _BLUE
-            subject = f"🔵 [TRADE OPEN] {ctx.get('side', '?')} BTCUSDT @ {ctx.get('entry', '?')}"
+            subject = (f"🔵 [TRADE OPEN] {ctx.get('side', '?')} {ctx.get('symbol', 'N/A')} "
+                       f"@ {ctx.get('entry', '?')}")
         elif kind == "breakeven":
             title, sub, color = "BREAKEVEN+ ENGAGED", "Position locked risk-free (fees covered)", _GREEN
             subject = "🛡️ [BREAKEVEN+] Trade Locked Risk-Free"
@@ -380,8 +381,18 @@ class Alerter:
             title, sub, color = "EMERGENCY MARKET CLOSE", "Failsafe circuit breaker executed", _RED
             subject = "🚨 [FAILSAFE] EMERGENCY MARKET CLOSE EXECUTED"
         elif kind == "halt":
-            title, sub, color = "HARD HALT TRIGGERED", "Equity preservation floor breached", _RED
-            subject = "🚨 [HALT] EQUITY PRESERVATION FLOOR BREACHED — ENTRIES DISABLED"
+            title, color = "HARD HALT TRIGGERED", _RED
+            trigger = str(ctx.get("Trigger", ""))
+            floor_hit = "Floor" in ctx or "floor" in trigger.lower()
+            if trigger and not floor_hit:
+                # operator/other halt: surface the real trigger instead of the
+                # legacy equity-floor wording (cosmetic context fix)
+                sub = f"Entries disabled — {trigger}"
+                subject = ("🚨 [HALT] ENTRIES DISABLED — "
+                           + trigger.split("(")[0].strip().upper()[:64])
+            else:
+                sub = "Equity preservation floor breached"
+                subject = "🚨 [HALT] EQUITY PRESERVATION FLOOR BREACHED — ENTRIES DISABLED"
         elif kind == "paused":
             title, sub, color = "ENTRIES PAUSED", "Circuit-breaker cooldown active", _AMBER
             subject = "🟠 [PAUSED] Aegis Circuit Breaker Engaged"
@@ -406,6 +417,26 @@ class Alerter:
         ]
         body = _ticket("DAILY PERFORMANCE DIGEST", "UTC 00:00 summary", _BLUE, rows)
         await self.send_html("📊 [DIGEST] Aegis-Universal Daily Performance Summary", body)
+
+    async def send_status(self, ctx: Dict[str, Any]) -> None:
+        """Periodic operator-facing engine status report (STATUS_HEARTBEAT_SECONDS)."""
+        scan_age = int(ctx.get("scan_age_s", -1))
+        scan_txt = f"{scan_age}s ago" if scan_age >= 0 else "no data yet"
+        rows = [
+            ("Instrument", f"{ctx.get('symbol', '?')} USDT Linear Perpetual"),
+            ("Equity", f"${ctx.get('equity', 0):.2f} USDT"),
+            ("Available", f"${ctx.get('available', 0):.2f} USDT"),
+            ("Baseline", f"${ctx.get('baseline', 0):.2f} USDT"),
+            ("Daily PnL", f"${float(ctx.get('pnl', 0)):+.4f} USDT"),
+            ("Closed Trades Today", str(ctx.get("closed", 0))),
+            ("Open Position", ctx.get("position", "none")),
+            ("Consensus (15m/1h)", ctx.get("consensus", "n/a")),
+            ("Last Scan", scan_txt),
+            ("Entries Halted?", "YES" if ctx.get("halted") else "No"),
+            ("Next Report In", f"~{int(ctx.get('next_report_min', 60))} min"),
+        ]
+        body = _ticket("ENGINE STATUS REPORT", "Periodic operator heartbeat", _BLUE, rows)
+        await self.send_html("🩺 [STATUS] Aegis-Universal Periodic Engine Status", body)
 
 
 # ---------------------------------------------------------------------------

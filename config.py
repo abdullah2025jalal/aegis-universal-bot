@@ -81,6 +81,7 @@ class Settings:
     daily_profit_lock_pct: float = 0.08                   # 8% daily profit -> lock until UTC 00:00
     equity_preservation_floor_pct: float = 0.80           # Hard preservation floor (80% of baseline)
     cooldown_minutes: int = 10                            # Post-trade cooldown
+    status_heartbeat_seconds: int = 3600                  # Periodic status email (0 disables)
     max_holding_hours: float = 24.0                       # TTL decay exit
 
     # ------------------------------------------------------------------
@@ -148,6 +149,7 @@ class Settings:
             daily_profit_lock_pct=_env_float("DAILY_PROFIT_LOCK_PCT", 0.08),
             equity_preservation_floor_pct=_env_float("EQUITY_PRESERVATION_FLOOR_PCT", 0.80),
             cooldown_minutes=_env_int("COOLDOWN_MINUTES", 10),
+            status_heartbeat_seconds=_env_int("STATUS_HEARTBEAT_SECONDS", 3600),
             max_holding_hours=_env_float("MAX_HOLDING_HOURS", 24.0),
             kill_switch_active=_env_bool("KILL_SWITCH_ACTIVE", False),
             scan_interval_seconds=_env_int("SCAN_INTERVAL_SECONDS", 60),

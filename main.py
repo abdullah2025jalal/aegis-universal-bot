@@ -105,6 +105,50 @@ async def digest_watchdog() -> None:
         await asyncio.sleep(60)
 
 
+# ============================================================================
+# Periodic status heartbeat watchdog (Section 9.4 addition)
+# ============================================================================
+
+async def status_watchdog() -> None:
+    """Operator status emails: equity, consensus, datafeed freshness, position
+    and breaker state. First report ~2 min after boot, then every
+    SETTINGS.status_heartbeat_seconds (0 disables the feature)."""
+    interval = SETTINGS.status_heartbeat_seconds
+    if interval <= 0:
+        return
+    next_due = time.time() + 75.0
+    while True:
+        try:
+            await asyncio.sleep(60.0)
+            if (time.time() < next_due or ALERTER is None or SCANNER is None
+                    or STATE is None):
+                continue
+            next_due = time.time() + interval
+            day_start = _utc_day_start_seconds(*time.gmtime()[:3])
+            stats = STATE.journal_day_stats(day_start)
+            last_scan = float((SCANNER.shared or {}).get("last_scan_ts", 0.0) or 0.0)
+            pos = SHARED.get("position")
+            position_txt = (f"{pos.side} {pos.qty} @ ${pos.entry:.6g}"
+                            if pos else "none")
+            ALERTER.enqueue(ALERTER.send_status, {
+                "symbol": SETTINGS.bybit_symbol,
+                "equity": SHARED.get("equity", 0.0),
+                "available": SHARED.get("available", 0.0),
+                "baseline": STATE.baseline_equity() or 0.0,
+                "pnl": stats.get("pnl", 0.0),
+                "closed": stats.get("closed", 0),
+                "position": position_txt,
+                "consensus": str((SCANNER.shared or {}).get("consensus", "")) or "n/a",
+                "scan_age_s": int(time.time() - last_scan) if last_scan else -1,
+                "halted": bool(STATE.kill_switch()
+                               or STATE.pause_until() > time.time()),
+                "next_report_min": max(1, int(interval / 60)),
+            })
+        except Exception as exc:  # noqa: BLE001
+            if ALERTER:
+                ALERTER.report("status.heartbeat", exc)
+
+
 def _utc_day_start_seconds(y: int, m: int, d: int, offset_days: int = 0) -> int:
     """UTC timestamp (seconds) for 00:00 N days before the given calendar date."""
     from datetime import datetime, timedelta, timezone
@@ -154,6 +198,7 @@ async def lifespan(_app: FastAPI):
     SCANNER.start()
     PMGR.start()
     BACKGROUND_TASKS.append(asyncio.create_task(digest_watchdog()))
+    BACKGROUND_TASKS.append(asyncio.create_task(status_watchdog()))
 
     if boot_report.get("ok"):
         external = os.getenv("RENDER_EXTERNAL_URL") or ""

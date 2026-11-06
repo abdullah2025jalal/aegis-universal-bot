@@ -29,8 +29,8 @@ engine semantics unchanged:
         - /healthz/{uuid}/pingext: one-shot read-only probe of
           api.bybit.com/v5/market/time and api.resend.com (no trade calls).
 
-Hard rules respected: no secrets in source, linear BTCUSDT only, all
-engine logic and gates imported untouched.
+Hard rules respected: no secrets in source, linear single-symbol trading
+via BYBIT_SYMBOL, all engine logic and gates imported untouched.
 """
 
 from __future__ import annotations

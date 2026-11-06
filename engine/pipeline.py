@@ -52,6 +52,7 @@ def make_pipeline(client, state, pm, alerter, shared, gates
                               atr=setup.atr_15m, opened_ts=time.time(),
                               journal_id=journal_id)
             ticket = {
+                "Symbol": client.s.bybit_symbol,
                 "Side": plan["side"], "Qty": plan["qty"],
                 "Entry": f"${setup.entry:,.1f}", "SL": f"${plan['sl_price']:,.1f}",
                 "TP": f"${plan['tp_price']:,.1f}",
