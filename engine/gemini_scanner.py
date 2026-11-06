@@ -233,7 +233,21 @@ class GeminiScanner:
     async def tick(self) -> str:
         ctx = await self._collect()
         t0 = time.time()
-        verdict, model_used, key_idx = await self._ask_gemini(ctx["features"])
+        try:
+            verdict, model_used, key_idx = await self._ask_gemini(ctx["features"])
+        except Exception as exc:  # noqa: BLE001 — whole chain down: the cycle
+            # EMAILS ANYWAY (operator directive: alerts first-to-first every
+            # 15 minutes). Honest synthetic status, no execution, no retry
+            # amplification; the loop's own handler no longer needed for this.
+            model_used, key_idx = "chain-down", -1
+            verdict = {
+                "action": "SCAN", "status": "ERROR",
+                "reason": (f"no AI verdict this cycle — every model in the chain "
+                           f"failed: {type(exc).__name__}: {str(exc)[:120]}"),
+                "confidence": None, "setup": "chain-down",
+                "valid_minutes": 0, "trend_1h": "n/a",
+                "trigger_price": None, "avg_price": None,
+            }
         ai_ms = (time.time() - t0) * 1000.0
 
         action = str(verdict.get("action", "HOLD")).upper()
@@ -252,6 +266,8 @@ class GeminiScanner:
         self.shared["error"] = ""
 
         execution_result = "n/a (HOLD / not triggered)"
+        if verdict.get("status") == "ERROR":
+            execution_result = "n/a (no AI verdict made — model chain down; no order placed)"
         if tradable and self.on_setup is not None:
             setup = self._build_setup(verdict, ctx, action)
             if setup is not None:
