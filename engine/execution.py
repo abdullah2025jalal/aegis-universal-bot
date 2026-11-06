@@ -191,9 +191,18 @@ class BybitClient:
 
         if int(data.get("retCode", -1)) != 0:
             err = BybitAPIError(int(data.get("retCode")), str(data.get("retMsg", "?")), path)
-            self._notify(err, path)
+            if not self._silently_tolerable(err):
+                self._notify(err, path)
             raise err
         return data.get("result") or {}
+
+    def _silently_tolerable(self, err: "BybitAPIError") -> bool:
+        """Errors that a caller policely tolerates (documented demo platform
+        limitations / idempotent no-ops) must NOT burn an email per boot."""
+        tolerated = {110043, 110044, 110026, 110009}   # leverage/margin no-ops
+        if self.s.bybit_demo and err.ret_code == 10032:
+            tolerated.add(10032)                       # demo-only endpoint limit
+        return err.ret_code in tolerated
 
     def _notify(self, exc: Exception, path: str) -> None:
         try:
