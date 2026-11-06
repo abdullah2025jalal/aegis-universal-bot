@@ -89,6 +89,9 @@ class DirectExecutor:
         cap = self.s.ai_max_price_deviation_usd
         ref = float(setup.entry)
         try:
+            if self.state and self.state.kill_switch():
+                return ("HALTED: operator kill switch engaged — press Resume (or "
+                        "POST /dashboard/resume) to re-arm the direct executor")
             if self.shared.get("position") is not None:
                 return ("SKIP: a position is already open — the day-trader playbook "
                         "manages one trade at a time (its SL/TP/trail owns the exit)")

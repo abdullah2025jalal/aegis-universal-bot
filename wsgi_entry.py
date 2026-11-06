@@ -30,7 +30,9 @@ engine semantics unchanged:
           api.bybit.com/v5/market/time and api.resend.com (no trade calls).
 
 Hard rules respected: no secrets in source, linear single-symbol trading
-via BYBIT_SYMBOL, all engine logic and gates imported untouched.
+via BYBIT_SYMBOL, all engine logic imported untouched (operator-directed
+direct mode: the AI verdict executes straight to the exchange with the
+single $1 price-cap condition).
 """
 
 from __future__ import annotations
@@ -172,7 +174,7 @@ _DASH_STYLE = """<!DOCTYPE html><html><head><title>Aegis-Universal</title></head
 <body style="font-family:'Segoe UI',sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:30px;">
 <h1 style="color:#10b981;">Aegis-Universal — Operator Monitor</h1>
 <table style="border-collapse:collapse;font-size:14px;">%s</table>
-<h2 style="color:#60a5fa;">Last Gate Decisions (newest first)</h2>
+<h2 style="color:#60a5fa;">Direct Execution Log</h2>
 <table style="border-collapse:collapse;font-size:13px;">%s</table>
 <h2 style="color:#f87171;">Recent Intercepted Errors</h2>
 <table style="border-collapse:collapse;font-size:13px;">%s</table>
@@ -188,7 +190,7 @@ async def _snapshot() -> dict:
     state = aegis.STATE
     scanner = aegis.SCANNER
     settings = aegis.SETTINGS
-    gates = aegis.GATES
+    executor = getattr(aegis, "EXECUTOR", None)   # DirectExecutor (AI verdict -> exchange)
     al = aegis.ALERTER
 
     if not sh.get("_t0"):
@@ -214,42 +216,30 @@ async def _snapshot() -> dict:
         "utc_day": state_day[0],
         "last_scan": (scanner.shared.get("last_scan_ts") if scanner else None),
         "last_consensus": (scanner.shared.get("consensus") if scanner else ""),
+        "last_execution": ((executor.last_result if executor else "") or "none yet"),
         "ts": int(time.time()),
     }
 
     boot = sh.get("boot") or {}
-    cooldown = "n/a"
-    if state and state.last_trade_closed_ts():
-        rem = max(0.0, settings.cooldown_minutes * 60 -
-                  (time.time() - state.last_trade_closed_ts())) / 60
-        cooldown = f"{rem:.1f} min"
 
     rows = [
-        ("System Status", "OPERATIONAL (24/7 scanning)" if not (state and state.kill_switch())
-         else "⛔ KILL SWITCH (entries halted)"),
+        ("System Status", "OPERATIONAL (24/7 AI cycles every 15m)" if not (state and state.kill_switch())
+         else "⛔ KILL SWITCH (operator engaged)"),
         ("Uptime", f"{uptime / 3600:.2f} h"),
         ("Total Equity", f"${sh.get('equity', 0):.2f} USDT"),
         ("Available", f"${sh.get('available', 0):.2f} USDT"),
         ("Baseline Equity", f"${(state.baseline_equity() or 0) if state else 0:.2f} USDT"),
-        ("Risk / Trade", f"{settings.risk_per_trade_pct * 100:.2f}%  @ {settings.max_leverage:g}x ISOLATED"),
+        ("Mode", f"DIRECT AI execution — no gates; operator rule: "
+                 f"≤${getattr(settings, 'ai_max_price_deviation_usd', 1.0):g} from the AI price"),
         ("Daily Realized PnL", f"${daily_pnl:.4f} USDT"),
-        ("Consecutive Losses", state.consecutive_losses() if state else 0),
-        ("Cooldown Remaining", cooldown),
         ("Position", (f"{pos.side} {pos.qty:.3f} @ ${pos.entry:,.1f} | opened "
                       f"{(time.time() - pos.opened_ts) / 3600:.2f}h ago") if pos else "flat"),
         ("Last Consensus", (scanner.shared.get("consensus", "") if scanner else "")),
+        ("Last Execution", ((executor.last_result if executor else "") or "none yet")),
         ("Boot Pre-flight", "PASSED (zero errors)" if boot.get("ok") else f"ISSUES: {boot.get('errors', [])}"),
     ]
 
-    gate_rows = []
-    if gates:
-        for item in list(gates.history)[:15]:
-            gate_rows.append((
-                time.strftime("%H:%M:%S", time.gmtime(item.get("ts", 0))),
-                html.escape(str(item.get("gate", ""))),
-                html.escape(str(item.get("direction", ""))),
-                html.escape(str(item.get("reason", "")))[:120],
-            ))
+    gate_rows = []  # direct mode: gates were removed by operator directive (2026-11-06)
 
     err_rows = []
     if al:
@@ -321,7 +311,7 @@ async def _do_resume() -> dict:
     if aegis.STATE:
         aegis.STATE.set_kill_switch(False)
         aegis.STATE.set_pause_until(0.0)
-    return {"status": "circuit breakers cleared (entries re-armed, gates remain active)"}
+    return {"status": "entries re-armed — direct AI execution resumes on the next 15-minute cycle"}
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +452,10 @@ def _dispatch(environ, start_response):
                         "%s | %s | %s" % (item[0], item[1], item[2]), item[3])
                     for item in snap["err_rows"])
                 status, headers, body = _html_bytes(_DASH_STYLE % (
-                    rows, (gate_rows or "<tr><td>none yet</td></tr>"),
+                    rows,
+                    "<tr><td>direct mode — every 15-minute AI decision is executed "
+                    "straight to the exchange (gates removed); decisions are emailed "
+                    "per cycle and surfaced in 'Last Execution' above</td></tr>",
                     (err_rows or "<tr><td>none</td></tr>")))
             except Exception as exc:  # noqa: BLE001
                 status, headers, body = _html_bytes(
