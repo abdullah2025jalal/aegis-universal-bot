@@ -83,8 +83,13 @@ class DirectExecutor:
         self.al = alerter
         self.s = settings
         self.shared = shared
+        self.last_result: str = ""   # surfaced on /healthz + dashboard
 
     async def execute(self, setup, verdict: Dict[str, Any]) -> str:
+        self.last_result = await self._execute(setup, verdict)
+        return self.last_result
+
+    async def _execute(self, setup, verdict: Dict[str, Any]) -> str:
         side = setup.direction
         cap = self.s.ai_max_price_deviation_usd
         ref = float(setup.entry)
