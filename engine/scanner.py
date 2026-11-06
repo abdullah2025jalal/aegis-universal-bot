@@ -107,9 +107,17 @@ class Scanner:
         return f"15m={s15} | 1h={s1h} | RSI15={float(a15.indicators.get('RSI') or -1):.1f}"
 
     def _fetch_pair(self) -> tuple:
-        a15 = _get_analysis(self.s.bybit_symbol, "15m", self._symbol_variants)
-        a1h = _get_analysis(self.s.bybit_symbol, "1h", self._symbol_variants)
-        return a15, a1h
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):  # datafeed transient backoff (2s/6s) — ops resilience only
+            try:
+                a15 = _get_analysis(self.s.bybit_symbol, "15m", self._symbol_variants)
+                a1h = _get_analysis(self.s.bybit_symbol, "1h", self._symbol_variants)
+                return a15, a1h
+            except Exception as exc:  # noqa: BLE001 — propagate after final attempt
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(2.0 + 4.0 * attempt)
+        raise last_exc if last_exc else RuntimeError("tradingview-ta produced no analysis")
 
     # ------------------------------------------------------------------
     # Daemon loop
