@@ -407,8 +407,23 @@ class BybitClient:
             "not modified", "not changed", "same", "no change",
             "110044", "110026", "110009"))
 
+    def _demo_endpoint_restricted(self, msg: str) -> bool:
+        """Demo Trade API refuses some position-config endpoints
+        (retCode 10032 'Demo trading are not supported.'). Documented
+        deviation: tolerated ONLY when BYBIT_DEMO=true — the demo venue
+        governs margin mode by default; the explicit set-leverage call
+        below still runs and the G0-G9 risk domain is untouched."""
+        if not self.s.bybit_demo:
+            return False
+        lowered = (msg or "").lower()
+        return "10032" in lowered or "demo trading are not supported" in lowered
+
     async def configure_leverage(self) -> str:
-        """Set ISOLATED margin + MAX_LEVERAGE; validates; returns verified mode string."""
+        """Set ISOLATED margin + MAX_LEVERAGE; validates; returns verified mode string.
+
+        BYBIT_DEMO=true: the demo API rejects /switch-isolated with 10032
+        (platform limitation, not a misconfiguration) — tolerated via
+        _demo_endpoint_restricted; /set-leverage still applies."""
         lev = min(self.s.max_leverage, (await self.instrument()).max_leverage)
         try:
             await self._request("POST", "/v5/position/switch-isolated", body={
@@ -419,7 +434,8 @@ class BybitClient:
                 "sellLeverage": f"{lev:g}",
             })
         except BybitAPIError as err:
-            if not self._tolerable(err.ret_msg):
+            if not (self._tolerable(err.ret_msg)
+                    or self._demo_endpoint_restricted(err.ret_msg)):
                 raise
         try:
             await self._request("POST", "/v5/position/set-leverage", body={
