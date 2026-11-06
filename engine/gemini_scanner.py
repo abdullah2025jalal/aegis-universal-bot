@@ -411,7 +411,7 @@ class GeminiScanner:
         if verdict is None:
             self.rot.advance_after_call()
             self.rot.record(ok=False, model=model, key=key_idx + 1,
-                            error="unparseable verdict")
+                            error=f"unparseable verdict: {text[:140]!r}")
             raise RuntimeError(f"gemini verdict not JSON: {text[:160]}")
         self.rot.advance_after_call()
         self.rot.record(ok=True, model=model, key=key_idx + 1,
