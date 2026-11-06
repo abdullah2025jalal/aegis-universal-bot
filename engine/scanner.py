@@ -108,15 +108,15 @@ class Scanner:
 
     def _fetch_pair(self) -> tuple:
         last_exc: Optional[Exception] = None
-        for attempt in range(3):  # datafeed transient backoff (2s/6s) — ops resilience only
+        for attempt in range(2):  # datafeed blip rescue: one gentle retry at +7s (429-ban safe)
             try:
                 a15 = _get_analysis(self.s.bybit_symbol, "15m", self._symbol_variants)
                 a1h = _get_analysis(self.s.bybit_symbol, "1h", self._symbol_variants)
                 return a15, a1h
             except Exception as exc:  # noqa: BLE001 — propagate after final attempt
                 last_exc = exc
-                if attempt < 2:
-                    time.sleep(2.0 + 4.0 * attempt)
+                if attempt < 1:
+                    time.sleep(7.0)
         raise last_exc if last_exc else RuntimeError("tradingview-ta produced no analysis")
 
     # ------------------------------------------------------------------
