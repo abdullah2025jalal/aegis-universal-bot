@@ -381,7 +381,7 @@ class GeminiScanner:
                           "parts": [{"text": json.dumps(features, separators=(",", ":"))}]}],
             "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
             "generationConfig": {
-                "temperature": 0.2, "maxOutputTokens": 400,
+                "temperature": 0.2, "maxOutputTokens": 2048,
                 "responseMimeType": "application/json",
             },
         }
@@ -401,17 +401,25 @@ class GeminiScanner:
             raise RuntimeError(
                 f"Gemini HTTP {resp.status_code}: {resp.text[:200]}")
         try:
-            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            body = resp.json()
+            cand0 = body["candidates"][0]
+            text = cand0["content"]["parts"][0]["text"]
+            finish = str(cand0.get("finishReason", ""))
         except (KeyError, IndexError, ValueError) as exc:
             self.rot.advance_after_call()
             self.rot.record(ok=False, model=model, key=key_idx + 1,
                             error="malformed envelope")
             raise RuntimeError("gemini response missing candidate text") from exc
+        if not str(text or "").strip():
+            self.rot.advance_after_call()
+            self.rot.record(ok=False, model=model, key=key_idx + 1,
+                            error=f"empty text finish={finish}")
+            raise RuntimeError(f"gemini empty text (finish={finish})")
         verdict = self._parse_verdict(text)
         if verdict is None:
             self.rot.advance_after_call()
             self.rot.record(ok=False, model=model, key=key_idx + 1,
-                            error=f"unparseable verdict: {text[:140]!r}")
+                            error=f"unparseable verdict (finish={finish}): {text[:140]!r}")
             raise RuntimeError(f"gemini verdict not JSON: {text[:160]}")
         self.rot.advance_after_call()
         self.rot.record(ok=True, model=model, key=key_idx + 1,
