@@ -116,7 +116,7 @@ class Settings:
     clock_resync_seconds: int = 900                       # Periodic server-time resync
 
     # ------------------------------------------------------------------
-    # Gemini AI decision feed (tradingview-ta replacement, user-directed)
+    # Gemini AI decision feed (user-directed AI decision head)
     # ------------------------------------------------------------------
     gemini_enabled: bool = True
     gemini_api_keys: List[str] = field(default_factory=list)
@@ -126,6 +126,9 @@ class Settings:
     ai_call_timeout_seconds: int = 45
     ai_calls_per_key: int = 8                             # rotate keys every N calls
     ai_state_path: str = "ai_state.json"                  # rotation + verdicts persistence
+    ai_max_price_deviation_usd: float = 1.0               # THE operator execution rule:
+                                                          # never fill more than $1 away
+                                                          # from the AI decision price
 
     # ------------------------------------------------------------------
     # Error telemetry anti-spam
@@ -181,6 +184,7 @@ class Settings:
             ai_call_timeout_seconds=_env_int("AI_CALL_TIMEOUT_SECONDS", 45),
             ai_calls_per_key=_env_int("AI_CALLS_PER_KEY", 8),
             ai_state_path=_env_str("AI_STATE_PATH", "ai_state.json") or "ai_state.json",
+            ai_max_price_deviation_usd=_env_float("AI_MAX_PRICE_DEVIATION_USD", 1.0),
         )
         return s
 

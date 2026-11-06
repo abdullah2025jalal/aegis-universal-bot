@@ -1,12 +1,12 @@
 """
 Aegis-Universal :: Gemini Decision Feed (tradingview-ta replacement)
 ====================================================================
-User-directed data-source change (documented deviation; G0-G9 untouched):
-the tradingview-ta consensus is replaced by a 15-minute decision cycle
-powered by gemini-3.8-flash (Google AI Studio / Generative Language API)
-applying the day-trader-skill playbook (github.com/Jakeschincariol/
-day-trader-skill — methodology port) on venue data only (Bybit public
-endpoints; TradingView is no longer queried anywhere).
+User-directed data-source change (documented deviation):
+the decision cycle is a 15-minute AI cadence powered by gemini-3.8-flash
+(Google AI Studio / Generative Language API) applying the day-trader-skill
+playbook (github.com/Jakeschincariol/day-trader-skill — methodology port)
+on venue data only (Bybit public endpoints; NO external market-data
+providers are contacted from anywhere in this codebase).
 
 Playbook mapping for a 24/7 crypto session (BTC/USDT linear perp only):
   scanner  -> UTC-day opening range (first 3 x 15m bars) + flag /
@@ -14,10 +14,14 @@ Playbook mapping for a 24/7 crypto session (BTC/USDT linear perp only):
   entry    -> only CLOSED 15m bars may trigger (a wick never triggers);
               waiting / triggered / expired; one trigger per setup per
               UTC day; late bars downgrade to expired (HOLD).
-  exit     -> engine-owned: ATR-clamped stop (1.5xATR seeded, 0.5%-2.0%
-              band) + 1.5R gross target — unchanged gate domain.
-  risk     -> G0-G9 remain the single authority. The AI verdict only
-              proposes a direction; every gate may veto it.
+  exit     -> attached exchange-side at execution: ATR-clamped stop
+              (1.5xATR seeded, 0.5%-2.0% band) + 1.5R target.
+  risk     -> DIRECT mode (operator directive 2026-11-06): every gate /
+              limit / warning between the verdict and the exchange was
+              removed. The AI verdict alone drives execution; the only
+              operator condition kept is the $1 execution-price cap
+              (AI_MAX_PRICE_DEVIATION_USD) enforced by the DirectExecutor
+              through Limit-IOC cap prices.
 
 Key & model rotation (AI Studio free tier survival matrix, user-specified):
   5 keys x AI_CALLS_PER_KEY calls (8) -> key#1(8) #2(8) #3(8) #4(8) #5(8)
@@ -49,11 +53,11 @@ import logging
 import os
 import re
 import time
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from engine.scanner import MarketSetup, compute_atr_14
+from engine.marketsetup import MarketSetup, compute_atr_14
 
 logger = logging.getLogger("aegis.gemini")
 
@@ -159,11 +163,12 @@ class GeminiScanner:
     """15-minute Gemini decision cycle feeding the standard trade pipeline."""
 
     def __init__(self, client, alerter, settings,
-                 on_setup: Optional[Callable[[MarketSetup], Coroutine[Any, Any, None]]]):
+                 on_setup=None, shared: Optional[Dict[str, Any]] = None):
         self.client = client
         self.al = alerter
         self.s = settings
         self.on_setup = on_setup
+        self.shared_account = shared  # operator-facing account snapshot (equity/position)
         if not settings.gemini_api_keys:
             raise RuntimeError("GEMINI_FEED enabled but GEMINI_API_KEYS is empty")
         self.rot = _RotationState(settings)
@@ -181,7 +186,8 @@ class GeminiScanner:
         return await self.tick()
 
     # ------------------------------------------------------------------
-    # Daemon loop (15-minute candle clock, first decision ~90s after boot)
+    # Daemon loop (15-minute candle clock; first decision ~12s after boot —
+    # the operator wants the first AI cycle to fire immediately)
     # ------------------------------------------------------------------
 
     def start(self) -> None:
@@ -203,7 +209,7 @@ class GeminiScanner:
             try:
                 if first:
                     first = False
-                    await asyncio.sleep(90.0)
+                    await asyncio.sleep(12.0)
                 else:
                     await self._sleep_to_quarter_boundary()
                 await self.tick()
@@ -245,17 +251,42 @@ class GeminiScanner:
         self.shared["last_scan_ts"] = time.time()
         self.shared["error"] = ""
 
+        execution_result = "n/a (HOLD / not triggered)"
         if tradable and self.on_setup is not None:
             setup = self._build_setup(verdict, ctx, action)
             if setup is not None:
                 try:
-                    await self.on_setup(setup)
+                    verdict["model"] = model_used
+                    verdict["key_idx"] = key_idx
+                    execution_result = await self.on_setup(setup, verdict) or "no result"
                 except Exception as exc:  # noqa: BLE001 — pipeline errors alert
                     self.al.report("gemini.pipeline", exc, {"direction": setup.direction})
+                    execution_result = f"PIPELINE ERROR: {type(exc).__name__}: {str(exc)[:140]}"
+
+        # Every cycle emails its own alert (operator wants first-to-first 15m)
+        acct = dict(self.shared_account or {})
+        pos = acct.get("position")
+        self.al.enqueue(self.al.send_ai_decision, {
+            "action": action, "status": status,
+            "conf": verdict.get("confidence"), "setup": verdict.get("setup"),
+            "valid_min": verdict.get("valid_minutes"), "trend_1h": verdict.get("trend_1h"),
+            "reason": str(verdict.get("reason", ""))[:200],
+            "trigger_price": verdict.get("trigger_price"),
+            "avg_price": verdict.get("avg_price"),
+            "model": model_used, "key": key_idx + 1,
+            "slot": self.rot.d["calls_current"], "call": self.rot.d["counter_total"],
+            "latency_ms": round(ai_ms),
+            "last_price": ctx["last_price"], "bid": ctx["entry_bid"], "ask": ctx["entry_ask"],
+            "execution": execution_result,
+            "opened": ctx["features"].get("utc_now"),
+            "symbol": self.s.bybit_symbol,
+            "equity": acct.get("equity"), "position": (
+                f"{pos.side} {pos.qty} @ ${pos.entry:,.1f}" if pos else "none"),
+        })
         return self.shared["consensus"]
 
     # ------------------------------------------------------------------
-    # Venue-only feature build (no TradingView anywhere)
+    # Venue-only feature build (Bybit endpoints only)
     # ------------------------------------------------------------------
 
     async def _collect(self) -> Dict[str, Any]:

@@ -439,6 +439,43 @@ class Alerter:
         body = _ticket("ENGINE STATUS REPORT", "Periodic operator heartbeat", _BLUE, rows)
         await self.send_html("🩺 [STATUS] Aegis-Universal Periodic Engine Status", body)
 
+    async def send_ai_decision(self, ctx: Dict[str, Any]) -> None:
+        """Every 15-minute AI cycle alert (operator directive: alerts first-to-first)."""
+        action = str(ctx.get("action", "?"))
+        status = str(ctx.get("status", "?"))
+        color = _RED if action == "SELL" else (_BLUE if action == "BUY" else _AMBER)
+        subject = (f"🤖 [AI CYCLE 15m] {action} ({status.lower()}) — "
+                   f"Aegis direct-execution feed")
+        rows = [
+            ("Verdict", f"{action} / {status}"),
+            ("Setup (skill)", str(ctx.get("setup", "n/a"))),
+            ("Confidence / Validity", f"{ctx.get('conf', 'n/a')} / {ctx.get('valid_min', '?')}m"),
+            ("1h Trend Context", str(ctx.get("trend_1h", "n/a"))),
+            ("AI Reason", str(ctx.get("reason", "n/a"))),
+            ("AI Trigger/Entry Price", (
+                f"${float(ctx['trigger_price']):,.1f}"
+                if ctx.get("trigger_price") not in (None, "", 0) else "n/a")),
+            ("Market at Decision (bid/ask)",
+             f"${float(ctx.get('bid') or 0):,.1f} / ${float(ctx.get('ask') or 0):,.1f}"),
+            ("Last Price", f"${float(ctx.get('last_price') or 0):,.1f}"),
+            ("Model / Key / Call#", (
+                f"{ctx.get('model')} · key#{ctx.get('key')}/5 · call#{ctx.get('call')}")),
+            ("AI Latency", f"{ctx.get('latency_ms', '?')} ms"),
+            ("Execution (direct, $1 cap)", str(ctx.get("execution", "n/a"))),
+            ("Equity", f"${float(ctx.get('equity') or 0):.2f} USDT"),
+            ("Open Position", ctx.get("position", "none")),
+            ("Cycle Time (UTC)", str(ctx.get("opened", ""))),
+            ("Next Cycle", "~15 min (quarter-hour close)"),
+        ]
+        body = _ticket(
+            "15-MINUTE AI DECISION", "Direct AI-verdict execution (operator modes)", color, rows,
+            extra_html=(
+                "<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;"
+                "padding:10px 14px;color:#cbd5e1;font-size:12px;'>"
+                "Operator rule enforced: no buy/sell at a price more than $1 away from the "
+                "AI decision price (Limit-IOC cap; IOC expiry = zero exposure).</div>"))
+        await self.send_html(subject, body)
+
 
 # ---------------------------------------------------------------------------
 # Section 9 builder wrapper (used by enqueue from sync context)

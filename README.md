@@ -4,23 +4,31 @@ Algorithmic trading system for Bybit USDT-linear perpetuals (BTCUSDT), built to 
 Aegis-Universal Master Operating Contract.
 
 ```
-main.py                     FastAPI web layer, lifespan, pipeline orchestration, exception trapping
+main.py                     FastAPI web layer, lifespan, direct-execution wiring, exception trapping
 config.py                   Typed environment configuration (no secrets in source)
 engine/
-  scanner.py                tradingview-ta 15m/1h consensus scanner (1-minute candle clock)
-  risk_gates.py             The 10 sequential risk gates (G0..G9) + Section-3 sizing formulary
+  gemini_scanner.py         AI decision feed: day-trader-skill playbook via gemini (15-min cadence),
+                            5-key rotation with ai_state.json persistence, model fallback chain
+  marketsetup.py            MarketSetup + ATR(14) from Bybit venue data
+  direct_executor.py        DIRECT AI execution: Limit-IOC capped at the operator $1 rule,
+                            ATR/1.5R exit planner, zero-naked-exposure audit
   execution.py              Direct Bybit REST v5: HMAC signing, token bucket, Limit-IOC brackets,
                             post-execution audit (zero naked exposure), failsafe market close
   position_manager.py       15s monitor: Breakeven+ @+1.0R, ATR trail @+1.2R (monotonic), 24h TTL
   reconciler.py             On-boot state recovery from the exchange (master ledger)
-  state.py                  Ephemeral SQLite cache (daily aggregates, cooldowns, journal)
+  state.py                  Ephemeral SQLite cache (daily aggregates, journal)
 services/
-  alerter.py                Resend telemetry: boot-success ticket, error tickets with stack
-                            traces (fingerprint dedupe, 15-minute throttle), trade events, digest
+  alerter.py                Resend telemetry: boot ticket, error tickets with stack traces
+                            (fingerprint dedupe), trade events, 15-minute AI-cycle alerts
 tools/
   bootstrap_system.py       Zero-touch deployment: GitHub repo+push, Render service+env+deploy,
                             UptimeRobot keep-alive monitor
 ```
+
+**Operator mode (2026-11-06):** the AI verdict executes directly — no risk gates,
+no cooldowns, no loss limits. The single operator condition: execution never
+happens at a price more than $1 away from the AI decision price (Limit-IOC caps;
+a drift beyond the cap expires the order with zero exposure).
 
 ## Local run
 

@@ -115,10 +115,10 @@ class Reconciler:
                 summary["baseline_initialized"] = True
             summary["baseline"] = self.state.baseline_equity()
 
-        # 7) AI decision feed drill (Bybit klines + gemini-3.8-flash)
+        # 7) AI decision feed probe (Bybit klines + gemini model chain)
         try:
             consensus = await self.scanner.probe()
-            summary["tv_consensus"] = consensus
+            summary["ai_consensus"] = consensus
         except Exception as exc:
             self.al.report("reconciler.boot", exc, {"step": "ai_feed_probe"})
             errors.append(f"AI decision feed test query failed: {type(exc).__name__}: {exc}")

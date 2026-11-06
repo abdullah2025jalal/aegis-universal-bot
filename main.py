@@ -32,10 +32,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from config import SETTINGS, Settings
 from engine.execution import BybitClient
 from engine.position_manager import PositionManager
-from engine.risk_gates import RiskGates
-from engine.pipeline import make_pipeline
+from engine.gemini_scanner import GeminiScanner
+from engine.direct_executor import DirectExecutor
 from engine.reconciler import Reconciler
-from engine.scanner import MarketSetup, Scanner
 from engine.state import StateStore
 from services.alerter import Alerter, install_loop_hook, install_process_hooks
 
@@ -52,14 +51,14 @@ logger = logging.getLogger("aegis.main")
 # ============================================================================
 SHARED: Dict[str, Any] = {
     "equity": 0.0, "available": 0.0, "position": None,
-    "boot": None, "booted": False, "gate_history": None,
+    "boot": None, "booted": False,
 }
 ALERTER: Optional[Alerter] = None
 CLIENT: Optional[BybitClient] = None
 STATE: Optional[StateStore] = None
-GATES: Optional[RiskGates] = None
-SCANNER: Optional[Scanner] = None
+SCANNER = None  # Gemini decision feed (the sole AI decision head)
 PMGR: Optional[PositionManager] = None
+EXECUTOR = None   # DirectExecutor (AI verdict -> exchange)
 BACKGROUND_TASKS: list = []
 
 
@@ -162,7 +161,7 @@ def _utc_day_start_seconds(y: int, m: int, d: int, offset_days: int = 0) -> int:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global ALERTER, CLIENT, STATE, GATES, SCANNER, PMGR
+    global ALERTER, CLIENT, STATE, SCANNER, PMGR, EXECUTOR
 
     s = SETTINGS
     ALERTER = Alerter(s.resend_api_key, s.receiver_email, s.alert_from_email,
@@ -171,15 +170,12 @@ async def lifespan(_app: FastAPI):
     CLIENT = BybitClient(s, ALERTER)
 
     PMGR = PositionManager(CLIENT, STATE, ALERTER, s, SHARED)
-    GATES = RiskGates(CLIENT, STATE, ALERTER, s, SHARED)
-    pipeline = make_pipeline(CLIENT, STATE, PMGR, ALERTER, SHARED, GATES)
-    if s.gemini_enabled:
-        from engine.gemini_scanner import GeminiScanner
-        logger.info("decision feed: Gemini (%s) every %ss — tradingview ignored",
-                    s.gemini_model, s.ai_scan_interval_seconds)
-        SCANNER = GeminiScanner(CLIENT, ALERTER, s, on_setup=pipeline)
-    else:
-        SCANNER = Scanner(CLIENT, ALERTER, s, on_setup=pipeline)
+    EXECUTOR = DirectExecutor(CLIENT, STATE, PMGR, ALERTER, s, SHARED)
+    logger.info("decision feed: Gemini (%s) every %ss — direct AI execution, "
+                "all operator conditions removed except the $1 price cap",
+                s.gemini_model, s.ai_scan_interval_seconds)
+    SCANNER = GeminiScanner(CLIENT, ALERTER, s, on_setup=EXECUTOR.execute,
+                            shared=SHARED)
     reconciler = Reconciler(CLIENT, STATE, ALERTER, s, PMGR, SCANNER)
 
     install_process_hooks(ALERTER)
@@ -323,7 +319,7 @@ _STATUS_STYLE = """<!DOCTYPE html><html><head><title>Aegis-Universal</title></he
 <body style="font-family:'Segoe UI',sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:30px;">
 <h1 style="color:#10b981;">Aegis-Universal — Operator Monitor</h1>
 <table style="border-collapse:collapse;font-size:14px;">%s</table>
-<h2 style="color:#60a5fa;">Last Gate Decisions (newest first)</h2>
+<h2 style="color:#60a5fa;">Direct Execution Log</h2>
 <table style="border-collapse:collapse;font-size:13px;">%s</table>
 <h2 style="color:#f87171;">Recent Intercepted Errors</h2>
 <table style="border-collapse:collapse;font-size:13px;">%s</table>
@@ -346,36 +342,21 @@ async def dashboard(request: Request):
     pos = SHARED.get("position")
     rows = ""
     for k, v in [
-        ("System Status", "OPERATIONAL (24/7 scanning)" if not (STATE and STATE.kill_switch())
-         else "⛔ KILL SWITCH (entries halted)"),
+        ("System Status", "OPERATIONAL (24/7 AI cycles every 15m)" if not (STATE and STATE.kill_switch())
+         else "⛔ KILL SWITCH (operator engaged)"),
         ("Uptime", f"{uptime() / 3600:.2f} h"),
         ("Total Equity", f"${SHARED.get('equity', 0):.2f} USDT"),
         ("Available", f"${SHARED.get('available', 0):.2f} USDT"),
         ("Baseline Equity", f"${STATE.baseline_equity() or 0:.2f} USDT"),
-        ("Risk / Trade", f"{SETTINGS.risk_per_trade_pct * 100:.2f}%  @ {SETTINGS.max_leverage:g}x ISOLATED"),
+        ("Mode", f"DIRECT AI execution — no gates; operator rule: ≤${SETTINGS.ai_max_price_deviation_usd:g} from the AI price"),
         ("Daily Realized PnL", f"${STATE.daily_realized_pnl():.4f} USDT"),
-        ("Consecutive Losses", STATE.consecutive_losses()),
-        ("Cooldown Remaining",
-         f"{max(0.0, SETTINGS.cooldown_minutes * 60 - (time.time() - STATE.last_trade_closed_ts())) / 60:.1f} min"
-         if STATE.last_trade_closed_ts() else "n/a"),
         ("Position", (f"{pos.side} {pos.qty:.3f} @ ${pos.entry:,.1f} | opened "
                       f"{(time.time() - pos.opened_ts) / 3600:.2f}h ago") if pos else "flat"),
         ("Last Consensus", SCANNER.shared.get("consensus", "") if SCANNER else ""),
+        ("Last Execution", (EXECUTOR.last_result if EXECUTOR else "") or "none yet"),
         ("Boot Pre-flight", "PASSED (zero errors)" if boot.get("ok") else f"ISSUES: {boot.get('errors', [])}"),
     ]:
         rows += _ROW_D % (k, v)
-
-    gate_rows = ""
-    if GATES:
-        for item in list(GATES.history)[:15]:
-            gate_rows += ("<tr><td style='padding:4px 12px;color:#9ca3af;'>%s</td>"
-                          "<td style='padding:4px 12px;'>%s</td>"
-                          "<td style='padding:4px 12px;'>%s</td>"
-                          "<td style='padding:4px 12px;'>%s</td></tr>") % (
-                time.strftime("%H:%M:%S", time.gmtime(item.get("ts", 0))),
-                html.escape(item.get("gate", "")),
-                html.escape(item.get("direction", "")),
-                html.escape(item.get("reason", ""))[:120])
 
     err_rows = ""
     if ALERTER:
@@ -388,7 +369,8 @@ async def dashboard(request: Request):
                 html.escape(rec.module), html.escape(rec.error_type),
                 html.escape(rec.message)[:120])
 
-    return HTMLResponse(_STATUS_STYLE % (rows, gate_rows or "<tr><td>none yet</td></tr>",
+    return HTMLResponse(_STATUS_STYLE % (rows,
+                                         "<tr><td>direct mode — no gate history</td></tr>",
                                          err_rows or "<tr><td>none</td></tr>"))
 
 
