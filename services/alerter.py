@@ -448,6 +448,7 @@ class Alerter:
                    f"Aegis direct-execution feed")
         rows = [
             ("Verdict", f"{action} / {status}"),
+            ("Per-Trade Net Stake", "±$2.00 fixed, fees included (SL ≈ −$2.00 / TP ≈ +$2.00)"),
             ("Setup (skill)", str(ctx.get("setup", "n/a"))),
             ("Confidence / Validity", f"{ctx.get('conf', 'n/a')} / {ctx.get('valid_min', '?')}m"),
             ("1h Trend Context", str(ctx.get("trend_1h", "n/a"))),
@@ -461,7 +462,7 @@ class Alerter:
             ("Model / Key / Call#", (
                 f"{ctx.get('model')} · key#{ctx.get('key')}/5 · call#{ctx.get('call')}")),
             ("AI Latency", f"{ctx.get('latency_ms', '?')} ms"),
-            ("Execution (direct, $1 cap)", str(ctx.get("execution", "n/a"))),
+            ("Execution (direct, zero-drift IOC)", str(ctx.get("execution", "n/a"))),
             ("Equity", f"${float(ctx.get('equity') or 0):.2f} USDT"),
             ("Open Position", ctx.get("position", "none")),
             ("Cycle Time (UTC)", str(ctx.get("opened", ""))),
@@ -472,8 +473,12 @@ class Alerter:
             extra_html=(
                 "<div style='background:#1e293b;border:1px solid #334155;border-radius:8px;"
                 "padding:10px 14px;color:#cbd5e1;font-size:12px;'>"
-                "Operator rule enforced: no buy/sell at a price more than $1 away from the "
-                "AI decision price (Limit-IOC cap; IOC expiry = zero exposure).</div>"))
+                "OPERATOR RULES ENFORCED:<br>"
+                "(1) PER-TRADE NET STAKE = <b>±$2.00</b> — a stop-out loses ≈$2.00 net and a "
+                "target-out gains ≈$2.00 net, fees included (SL/TP attached exchange-side).<br>"
+                "(2) FILL TOLERANCE ≤$1 — fills happen at the live best price, never more than "
+                "$1 away from the AI decision price (Limit-IOC cap; beyond it the IOC expires "
+                "with zero exposure). This is execution-price hygiene, NOT the trade stake.</div>"))
         await self.send_html(subject, body)
 
 

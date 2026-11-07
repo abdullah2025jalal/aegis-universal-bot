@@ -27,8 +27,8 @@ def main():
     atr = compute_atr_14(klines)
     assert approx(atr, 1.0), f"atr={atr}"
 
-    # ---- FIXED ±$1 stakes (operator directive 2026-11-06) --------------
-    # plan_bracket now: qty=exchange minimum; SL nets ≈ -$1, TP nets ≈ +$1
+    # ---- FIXED ±$2 stakes (operator directive 2026-11-07) --------------
+    # plan_bracket now: qty=exchange minimum; SL nets ≈ -$2, TP nets ≈ +$2
     # (fees included); the only widening force is the 1.5*ATR noise floor.
     specs = InstrumentSpec("BTCUSDT", tick_size=0.1, qty_step=0.001,
                            min_order_qty=0.001, max_order_qty=1000.0, max_leverage=100.0)

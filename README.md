@@ -10,8 +10,9 @@ engine/
   gemini_scanner.py         AI decision feed: day-trader-skill playbook via gemini (15-min cadence),
                             5-key rotation with ai_state.json persistence, model fallback chain
   marketsetup.py            MarketSetup + ATR(14) from Bybit venue data
-  direct_executor.py        DIRECT AI execution: Limit-IOC capped at the operator $1 rule,
-                            ATR/1.5R exit planner, zero-naked-exposure audit
+  direct_executor.py        DIRECT AI execution: zero-drift Limit-IOC (fill tolerance ≤$1),
+                            fixed ±$2 net stake machine (SL nets -$2 / TP nets +$2, fees
+                            included, tpsl Full), one trade at a time, zero-naked-exposure audit
   execution.py              Direct Bybit REST v5: HMAC signing, token bucket, Limit-IOC brackets,
                             post-execution audit (zero naked exposure), failsafe market close
   position_manager.py       15s monitor: Breakeven+ @+1.0R, ATR trail @+1.2R (monotonic), 24h TTL

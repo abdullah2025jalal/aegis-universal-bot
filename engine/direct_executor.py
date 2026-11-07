@@ -4,25 +4,27 @@ Aegis-Universal :: Direct AI Executor (operator-directed mode, 2026-11-06)
 The operator instructed: remove every blocking condition / control /
 warning between the AI verdict and the exchange. The AI decision head
 (day-trader-skill playbook is what the AI itself reasons with) now flows
-straight to execution. Exactly ONE operator condition remains, enforced
-here AND by the exchange itself:
+straight to execution. Exactly TWO operator rules remain — neither is a
+gate on the decision, both are enforced mechanically here:
 
-    ** Never execute at a price more than $1 away from the AI decision
-       price. ** Enforced by capping the Limit-IOC order:
-         BUY  -> limit price = decision-ask + $1  (fills instantly at ask
-                 if ask <= cap; otherwise IOC expires — zero exposure)
-         SELL -> limit price = decision-bid - $1  (fills at bid if
-                 bid >= cap; otherwise IOC expires)
+    RULE 1 — FIXED ±$2 NET PER TRADE (the stake, directive 2026-11-07):
+      the exchange-minimum quantity is the whole position; the stop and
+      the target are placed so a stop-out loses ≈$2 NET and a
+      target-out gains ≈$2 NET (round-trip fees included), both attached
+      exchange-side, atomic with the entry, tpslMode Full.
 
-    A favorable move past the cap fills at BETTER prices than the cap
-    (limit semantics), so execution is always honest to the decision.
+    RULE 2 — FILL TOLERANCE ≤$1 (execution-price hygiene, NOT the stake):
+      ** Never fill at a price more than $1 away from the AI decision
+         price. ** Enforced by capping the Limit-IOC order:
+           BUY  -> limit price = min(live ask, decision + $1)
+           SELL -> limit price = max(live bid, decision - $1)
+         The order is pinned to the live best bid/ask (zero drift);
+         if the book left the tolerance before the match, the IOC
+         expires — zero exposure. A favorable move fills BETTER.
 
-Everything else that remains is pure mechanical plumbing required to
-reach and hold the market safely, not a condition on the AI:
+Everything else is pure mechanical plumbing required to reach and
+hold the market safely, not a condition on the AI:
   * instrument min-lot determination (Bybit rejects smaller sizes),
-  * the operator's fixed ±$1 stake: an exchange-minimum order whose stop
-    loses ≈$1 net and whose target gains ≈$1 net (both attached
-    exchange-side, atomic with the entry, tpslMode Full),
   * the zero-naked-exposure audit (SL confirmed or emergency flat),
   * the ledger (journal + position adoption) and email alerts.
 """
@@ -37,16 +39,16 @@ logger = logging.getLogger("aegis.direct")
 
 
 def plan_bracket(entry: float, atr: float, spec, s, side: str) -> Dict[str, Any]:
-    """FIXED-$1 operator staking (directive 2026-11-06): the exchange-minimum
-    quantity is the deterministic stake; the stop and the target are placed so
-    that a stop-out loses ≈$1 NET and a target-out gains ≈$1 NET (round-trip
-    fees included):
+    """RULE 1 — FIXED ±$2 NET operator staking (directive 2026-11-07): the
+    exchange-minimum quantity is the deterministic stake; the stop and the
+    target are placed so that a stop-out loses ≈$2 NET and a target-out gains
+    ≈$2 NET (round-trip fees included):
 
-        net SL hit  =  -(sl_distance + fee_per_unit) * qty  =  -$1
-        net TP hit  =  +(tp_distance - fee_per_unit) * qty  =  +$1
+        net SL hit  =  -(sl_distance + fee_per_unit) * qty  =  -$2
+        net TP hit  =  +(tp_distance - fee_per_unit) * qty  =  +$2
 
     If the market is unusually volatile the stop is honored at the 1.5*ATR
-    noise floor, which may widen the realized loss modestly beyond $1 —
+    noise floor, which may widen the realized loss modestly beyond $2 —
     honesty over fabrication. Pure arithmetic (also used by tools/smoke_test.py);
     no pass/block verdicts here.
     """
@@ -59,7 +61,7 @@ def plan_bracket(entry: float, atr: float, spec, s, side: str) -> Dict[str, Any]
     noise_floor = 1.5 * float(atr or 0.0)
     if sl_distance < noise_floor:
         sl_distance = noise_floor                  # stop beyond intrabar noise
-    tp_distance = risk / qty + fee_per_unit        # anchored to net +$1 regardless of SL
+    tp_distance = risk / qty + fee_per_unit        # anchored to net +$2 regardless of SL
     if side == "Buy":
         sl_price, tp_price = entry - sl_distance, entry + tp_distance
     else:
@@ -67,13 +69,14 @@ def plan_bracket(entry: float, atr: float, spec, s, side: str) -> Dict[str, Any]
     return {
         "qty": qty, "sl_price": sl_price, "tp_price": tp_price,
         "sl_distance": sl_distance, "tp_distance": tp_distance,
-        "risk_usd": risk, "net_rr": 1.0,           # ±$1 after fees, by design
+        "risk_usd": risk, "net_rr": 1.0,           # ±$2 after fees, by design
         "orderLinkId": f"aegis-uni-{int(time.time() * 1000)}",
     }
 
 
 class DirectExecutor:
-    """AI verdict -> $1-capped Limit-IOC bracket -> exchange audit -> alerts."""
+    """AI verdict -> zero-drift Limit-IOC (fill tolerance ≤$1) with the fixed
+    ±$2 net bracket -> exchange audit -> alerts."""
 
     def __init__(self, client, state, pm, alerter, settings, shared):
         self.client = client
@@ -104,9 +107,9 @@ class DirectExecutor:
             if side == "Buy":
                 cap_price = ref + cap
                 if ask > cap_price:
-                    return (f"SKIP (operator $1 rule): AI decided ${ref:,.1f}; "
+                    return (f"SKIP (fill tolerance ${cap:g}): AI decided ${ref:,.1f}; "
                             f"ask ${ask:,.1f} is ${ask - ref:,.2f} higher — more than "
-                            f"the ${cap:g} cap (${cap_price:,.1f}). No purchase.")
+                            f"${cap:g} away (${cap_price:,.1f}). No purchase at this drift.")
                 # ZERO-DRIFT entry: pin the order to the live best ask, so the
                 # fill happens AT the observed market (never above the operator
                 # cap; a collapse before the IOC match simply cancels).
@@ -114,9 +117,9 @@ class DirectExecutor:
             else:
                 cap_price = ref - cap
                 if bid < cap_price:
-                    return (f"SKIP (operator $1 rule): AI decided ${ref:,.1f}; "
+                    return (f"SKIP (fill tolerance ${cap:g}): AI decided ${ref:,.1f}; "
                             f"bid ${bid:,.1f} is ${ref - bid:,.2f} lower — more than "
-                            f"the ${cap:g} cap (${cap_price:,.1f}). No sale.")
+                            f"${cap:g} away (${cap_price:,.1f}). No sale at this drift.")
                 # ZERO-DRIFT entry: pin to the live best bid — fills at the
                 # observed market, never below the operator cap.
                 limit_price = max(bid, cap_price)
@@ -154,7 +157,7 @@ class DirectExecutor:
                 "SL": f"${plan['sl_price']:,.1f}",
                 "TP": f"${plan['tp_price']:,.1f}",
                 "Risk $ (fixed)": f"±${plan['risk_usd']:.2f} net (SL -$ / TP +$, fees incl.)",
-                "Mode": "Direct AI verdict — Limit-IOC $1 cap, fixed ±$1 stake (tpsl Full)",
+                "Mode": "Direct AI verdict — zero-drift Limit-IOC, fixed ±$2 net stake (tpsl Full)",
                 "AI Setup": str(verdict.get("setup", "n/a")),
                 "AI Confidence": str(verdict.get("confidence", "")),
                 "AI Reason": str(verdict.get("reason", ""))[:140],
