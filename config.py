@@ -123,15 +123,15 @@ class Settings:
     gemini_model: str = "gemini-3.8-flash"
     gemini_fallback_models: List[str] = field(default_factory=list)  # 503 demand chain
     ai_scan_interval_seconds: int = 900                   # 15-minute decision cadence
-    ai_call_timeout_seconds: int = 45
+    ai_call_timeout_seconds: int = 75                     # thinking-heavy grounded calls
     ai_calls_per_key: int = 8                             # rotate keys every N calls
     ai_state_path: str = "ai_state.json"                  # rotation + verdicts persistence
     ai_max_price_deviation_usd: float = 1.0               # THE operator execution rule:
                                                           # never fill more than $1 away
                                                           # from the AI decision price
-    fixed_risk_per_trade_usd: float = 1.0                 # operator directive 2026-11-06:
-                                                          # every trade nets ±$1 (stop loses
-                                                          # ≈$1 after fees, target gains ≈$1)
+    fixed_risk_per_trade_usd: float = 2.0                 # operator directive 2026-11-06 v2:
+                                                          # every trade nets ±$2 (stop loses
+                                                          # ≈$2 after fees, target gains ≈$2)
 
     # ------------------------------------------------------------------
     # Error telemetry anti-spam
@@ -184,11 +184,11 @@ class Settings:
                 m.strip() for m in _env_str("GEMINI_FALLBACK_MODELS").replace("\n", ",").split(",")
                 if m.strip()],
             ai_scan_interval_seconds=_env_int("AI_SCAN_INTERVAL_SECONDS", 900),
-            ai_call_timeout_seconds=_env_int("AI_CALL_TIMEOUT_SECONDS", 45),
+            ai_call_timeout_seconds=_env_int("AI_CALL_TIMEOUT_SECONDS", 75),
             ai_calls_per_key=_env_int("AI_CALLS_PER_KEY", 8),
             ai_state_path=_env_str("AI_STATE_PATH", "ai_state.json") or "ai_state.json",
             ai_max_price_deviation_usd=_env_float("AI_MAX_PRICE_DEVIATION_USD", 1.0),
-            fixed_risk_per_trade_usd=_env_float("FIXED_RISK_PER_TRADE_USD", 1.0),
+            fixed_risk_per_trade_usd=_env_float("FIXED_RISK_PER_TRADE_USD", 2.0),
         )
         return s
 

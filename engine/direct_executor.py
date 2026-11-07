@@ -53,7 +53,7 @@ def plan_bracket(entry: float, atr: float, spec, s, side: str) -> Dict[str, Any]
     spec = spec or type("S", (), {"qty_step": 0.001, "min_order_qty": 0.001,
                                   "max_order_qty": 100.0, "tick_size": 0.1})()
     qty = spec.min_order_qty                       # deterministic stake (0.001 BTC)
-    risk = float(getattr(s, "fixed_risk_per_trade_usd", 1.0) or 1.0)
+    risk = float(getattr(s, "fixed_risk_per_trade_usd", 2.0) or 2.0)
     fee_per_unit = entry * s.round_trip_fee_rate
     sl_distance = risk / qty - fee_per_unit
     noise_floor = 1.5 * float(atr or 0.0)

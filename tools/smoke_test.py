@@ -37,13 +37,13 @@ def main():
     fee_u = entry * s.round_trip_fee_rate   # round-trip taker fee per BTC
     plan = plan_bracket(entry, 300.0, specs, s, "Buy")
     assert approx(plan["qty"], specs.min_order_qty), plan
-    assert approx(plan["sl_distance"], 1.0 / 0.001 - fee_u), plan["sl_distance"]
-    assert approx(plan["tp_distance"], 1.0 / 0.001 + fee_u), plan["tp_distance"]
+    assert approx(plan["sl_distance"], 2.0 / 0.001 - fee_u), plan["sl_distance"]
+    assert approx(plan["tp_distance"], 2.0 / 0.001 + fee_u), plan["tp_distance"]
     assert approx(plan["sl_price"], entry - plan["sl_distance"])
     assert approx(plan["tp_price"], entry + plan["tp_distance"])
-    # net P/L at the levels: SL = -$1 and TP = +$1, fees included
-    assert approx((plan["sl_distance"] + fee_u) * 0.001, 1.0)
-    assert approx((plan["tp_distance"] - fee_u) * 0.001, 1.0)
+    # net P/L at the levels: SL = -$2 and TP = +$2, fees included
+    assert approx((plan["sl_distance"] + fee_u) * 0.001, 2.0)
+    assert approx((plan["tp_distance"] - fee_u) * 0.001, 2.0)
     print(f"  fixed stake (Buy): SL=${plan['sl_price']:,.1f} TP=${plan['tp_price']:,.1f} "
           f"(distances ${plan['sl_distance']:,.1f} / ${plan['tp_distance']:,.1f})")
 
@@ -51,15 +51,20 @@ def main():
     assert approx(plan_sell["sl_price"], entry + plan_sell["sl_distance"])
     assert approx(plan_sell["tp_price"], entry - plan_sell["tp_distance"])
 
-    # noise floor: unusually high ATR widens the stop past the $1 target
-    # (honest edge case — realized loss may exceed $1 modestly)
+    # noise floor: unusually high ATR widens the stop past the $2 target
+    # (honest edge case — realized loss may exceed $2 modestly).
+    # ATR=800: floor 1200 < 2000-fee -> normal fixed $2 distance holds.
     plan_big = plan_bracket(entry, 800.0, specs, s, "Buy")
-    assert approx(plan_big["sl_distance"], 1200.0)
-    assert approx(plan_big["tp_distance"], 1.0 / 0.001 + fee_u)  # TP still nets +$1
+    assert approx(plan_big["sl_distance"], 2.0 / 0.001 - fee_u)
+    assert approx(plan_big["tp_distance"], 2.0 / 0.001 + fee_u)  # TP still nets +$2
+    # ATR=1600: floor 2400 > fixed distance -> stop widens, TP stays net +$2
+    plan_huge = plan_bracket(entry, 1600.0, specs, s, "Buy")
+    assert approx(plan_huge["sl_distance"], 2400.0)
+    assert approx(plan_huge["tp_distance"], 2.0 / 0.001 + fee_u)
 
-    # $1 execution cap constants present (operator rules)
+    # $1 execution cap + $2 fixed stake constants present (operator rules)
     assert s.ai_max_price_deviation_usd >= 0.0
-    assert approx(s.fixed_risk_per_trade_usd, 1.0)
+    assert approx(s.fixed_risk_per_trade_usd, 2.0)
 
     # formatting helpers
     assert fmt_price(72140.51, 0.1) == "72140.5"

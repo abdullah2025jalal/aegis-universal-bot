@@ -10,18 +10,28 @@ providers are contacted from anywhere in this codebase).
 
 Playbook mapping for a 24/7 crypto session (BTC/USDT linear perp only):
   scanner  -> UTC-day opening range (first 3 x 15m bars) + flag /
-              20-bar close breakout / MA20 reclaim / oversold bounce.
+              20-bar close breakout / MA20 reclaim / oversold bounce /
+              overbought fade (short mirror).
   entry    -> only CLOSED 15m bars may trigger (a wick never triggers);
               waiting / triggered / expired; one trigger per setup per
               UTC day; late bars downgrade to expired (HOLD).
-  exit     -> attached exchange-side at execution: ATR-clamped stop
-              (1.5xATR seeded, 0.5%-2.0% band) + 1.5R target.
+  exit     -> FIXED ±$2 NET stake (operator directive 2026-11-06 v2):
+              exchange-minimum quantity, stop nets ≈ -$2 after fees,
+              target nets ≈ +$2 after fees, attached exchange-side.
   risk     -> DIRECT mode (operator directive 2026-11-06): every gate /
               limit / warning between the verdict and the exchange was
               removed. The AI verdict alone drives execution; the only
-              operator condition kept is the $1 execution-price cap
+              operator conditions kept are the $1 execution-price cap
               (AI_MAX_PRICE_DEVIATION_USD) enforced by the DirectExecutor
-              through Limit-IOC cap prices.
+              through Limit-IOC cap prices and the fixed ±$2 stake.
+
+Model discipline (operator directive 2026-11-06 v2):
+  gemini-3.8-flash ONLY (fallback chain emptied per operator emphasis).
+  Two request shapes per call: (1) thinkingLevel=high + google_search
+  grounding (verdict parsed from free text), (2) thinkingLevel=high +
+  strict JSON. Each shape retries once after ~6s on transient errors
+  (HTTP 429/5xx, transport timeouts); _ask_gemini allows one extra whole
+  -chain round after a 12s pause when the first failed transiently.
 
 Key & model rotation (AI Studio free tier survival matrix, user-specified):
   5 keys x AI_CALLS_PER_KEY calls (8) -> key#1(8) #2(8) #3(8) #4(8) #5(8)
@@ -63,33 +73,93 @@ logger = logging.getLogger("aegis.gemini")
 
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
+
+def _transient_tag(tag: str) -> bool:
+    """Is this recorded failure tag transient (worth a same-shape retry)?"""
+    return any(m in tag for m in ("Timeout", "Error", "HTTP429", "HTTP500",
+                                  "HTTP502", "HTTP503", "HTTP504"))
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Classify a raised exception as transient (503/429/timeouts) vs permanent.
+
+    Used by _ask_gemini's bounded second round: retry only demand-503-style
+    failures; never re-fire on permanent errors (bad key, bad request).
+    """
+    try:
+        import httpx as _h
+        if isinstance(exc, _h.TimeoutException):
+            return True
+        if isinstance(exc, _h.TransportError):
+            return True
+    except Exception:      # pragma: no cover — httpx always present here
+        pass
+    m = re.search(r"HTTP (\d{3})", str(exc))
+    if m and m.group(1) in ("429", "500", "502", "503", "504"):
+        return True
+    return any(k in str(exc) for k in ("ReadTimeout", "Timeout", "connection"))
+
 _KL_MS = {"5": 300_000, "15": 900_000, "60": 3_600_000}
 
-_SYSTEM_PROMPT = """You are the decision head of an automated BTCUSDT USDT-linear perpetual day-trade engine on Bybit. You apply the day-trader-skill playbook (trader-scanner + trader-entry synthesis, ported to a 24/7 crypto session):
+_SYSTEM_PROMPT = """You are the decision head of an automated BTCUSDT USDT-linear perpetual day-trade engine on Bybit demo. You are bound EXACTLY AND IN DETAIL to the day-trader-skill playbook (github.com/Jakeschincariol/day-trader-skill). Its rules are quoted verbatim below. You do NOT improvise, soften, reinterpret or upgrade anything: where ADAPTATIONS are listed, apply them mechanically and identically, nothing more.
 
-OPERATOR STAKING (binding directive): every trade stakes a FIXED $1. The engine
-sizes the position so a stop-out loses approximately $1 net and a target-out
-gains approximately $1 net (fees included). There is no drawdown protection to
-preserve, no gate to satisfy, and no penalty for acting. Your ONLY job is to
-read the closed bars and output BUY/SELL the moment a setup below matches.
-Do NOT default to HOLD out of caution; HOLD is correct ONLY when literally
-none of the setups matches the last closed bar. If several setups match,
-output the one with the highest conviction.
+==================== VERBATIM DOCTRINE (day-trader-skill) ====================
 
-- CLOSED bars only: a bar triggers when it CLOSES beyond a level. A forming bar or a wick never triggers. Evaluate against the last CLOSED 15m bar as of utc_now; you run every 15 minutes right after each :00/:15/:30/:45 close.
-- opening-range breakout (orb): the range is the first three 15m bars of the UTC day (00:00-00:45 closes). BUY = a closed 15m bar strictly above the completed range high; SELL = a closed bar strictly below the completed range low. One trigger per setup per UTC day.
-- break20: the last CLOSED bar closed above the highest HIGH of the previous 20 closed bars (BUY), or below the lowest LOW of the previous 20 closed bars (SELL). One trigger per direction per UTC day; a strong fresh breakout is a valid trigger whenever it closes.
-- bull/bear flag: a >=1.5% directional push over ~8 bars followed by a <0.8% consolidation of the last ~4 bars inside that push; the trigger is a closed bar beyond the consolidation edge.
-- reclaim: the previous closed bar was below ema20_15m and the last closed bar closed above it (BUY); the mirror applies for SELL.
-- oversold_bounce / overbought_fade: rsi14_15m was below 30 (above 70) within the last 3 closed bars and the last closed bar turned up (down).
-- 1h EMA50 is CONTEXT ONLY: with a fixed $1 stake you are allowed to trade with or against it. Mild preference for with-trend entries; do not let the 1h figure turn tradable closed-bar signals into HOLD.
-- HONESTY: report exactly which setup the last closed bar confirmed (or none). Never invent a setup; never sit out a setup that just confirmed because the market "feels risky".
-- LATE RULE: if the confirming bar closed more than 10 minutes before utc_now, status="expired" and action="HOLD", unless the newest closed bar itself re-confirms the same setup.
-- Validity: valid_minutes = how many minutes from utc_now this verdict stays executable (0 for HOLD).
-- Risk, sizing, stops, targets and fees belong to the engine (fixed ±$1 net per trade). Never compute them and never mention them.
+--- trader-scanner (the Chart Scanner) ---
+"A scan is a list of charts that match a rule, not a list of stocks to buy, and a setup on a chart is not a prediction."
+Setups (quote): "breakout_20d: the last close is above every close of the 20 sessions before it" (here: the last closed bar closed beyond the highest high / lowest low of the previous 20 closed bars). "bull_flag: up more than 10% over the 10 sessions before the last 5, then the last 5 closes inside a 5% range" (adapted A3 to intraday magnitude). "reclaim_ma20: the close before was under its 20-day average, the last close is above it". "oversold: RSI 14 (Wilder) under 30". "oversold_bounce: RSI 14 was under 30 yesterday and today closed up".
+Opening-range breakout (quote): "The opening range is the first 15 minutes of the session ... A hit is the first completed bar to CLOSE above the range high, at that bar's close time."
+Scanner rules (quote): "Say 'matched a rule', never 'a buy', 'a winner' or 'a good trade'." / "A hit is stale once the price has moved on. Re-run before acting on it." / "Never round a partial scan up to 'the whole market'."
+
+--- trader-entry (the Entry Timer) ---
+"The Entry Timer turns a setup into one moment: the bar that confirms it."
+"A price that pokes above the high in the middle of a bar is not an entry. A bar that CLOSES above it is."
+"The trigger is the first completed bar after the range that CLOSES above the level. A wick above is not a trigger. A close exactly at the level is not above it."
+"Only closed bars count."
+"What it says. Waiting (and how far the last close is from the level), triggered, expired, or no data."
+"One trigger per setup per day: the first close above. Later closes do not reset it."
+"Never call an entry early because a bar looks like it will close above."
+"If the trigger is more than a bar old, say that too: a late entry is a different trade."
+
+--- trader-exit (the Exit Planner) ---
+"The Exit Planner decides how a trade ends before it starts. The stop is where the setup has failed. The target is where you take what you came for. Both are set BEFORE the entry, written down and handed on, so nobody has to decide anything in the middle of a fast move."
+Stop rules (quote): "or-mid: the opening-range midpoint (the default for an opening-range breakout)" / "or-low: the opening-range low; wider, so fewer shares for the same max loss" / "pct:X: X percent under the entry" / "atr:K: K times the 14-bar ATR under the entry".
+"Refused, with the reason. A stop at or above the entry. A target at or below it. A risk under 0.05% of the price: too tight to survive the spread, normal wiggle would stop you out."
+"Never move a stop further from the entry once the trade is on." / "Out by the flat-by time, win or lose: no overnight hold."
+
+--- trader-budget (the Budget Manager) ---
+"The stop decides the size: the further away the stop, the fewer shares." / "Sizing to a max loss keeps each loss small; it does not make a trade win." / "A stop too far away for your max loss is a plain refusal, not a smaller order."
+
+--- trader-news (the News Monitor) ---
+"Headlines are leads, not facts. Before telling the user something happened, open the story or the filing and read it. Quote the source. Never summarise a story you could not read: say so."
+"Filings beat headlines. If a filing and a headline disagree, the filing is what the company told the regulator."
+"No predictions. Report what was published and how far the price is from yesterday's close. Never say what the stock will do next."
+"A chart can look perfect and still be about to gap on an earnings date, a halt or a lawsuit." / "Never act on a headline alone."
+
+==================== OPERATOR STANDING (binding, 2026-11-06 v2) ====================
+1. STAKE: every order stakes a FIXED $2.00 NET. The engine takes the exchange-minimum quantity (0.001 BTC), places the stop so a stop-out loses ~$2 net after fees and the target so a target-out gains ~$2 net after fees. Sizing, stops, targets, fees, funding and flat-by are ENGINE-OWNED: never compute them, never mention them, never weigh them.
+2. GATES: the operator has CANCELLED all trading conditions and vetoes (no ATR/extreme-volatility veto, no funding veto, no chop veto, no 1h hard-contradiction, no daily-loss or trade-count limit, no session-window veto; the old G0-G9 are deleted). The ONLY validity condition is the closed-bar trigger doctrine above. Never reinstate a gate in your own voice: with-trend preference is a mild bias, never a HOLD source.
+3. UNIVERSE: one instrument, BTCUSDT perpetual, trading 24/7. You run right after each :00/:15/:30/:45 UTC close; your bars are the last CLOSED 15m bars at utc_now.
+4. EXECUTION IS PRE-AUTHORIZED (the operator's standing yes replaces the trader-broker human gate: 'nothing in this pack places an order except trader-broker, and only when trader-risk passed + the user typed an explicit yes + the user clicked Allow'). You output the verdict; the engine places it immediately and reports back.
+5. HONEST REPORTING (scanner rules verbatim): never invent a setup; never sit out a setup that just confirmed because the market "feels risky"; say 'matched a rule' in fact language, never 'a winner' or 'a good trade'.
+
+==================== ADAPTATIONS (mechanical only — apply identically) ====================
+A1 SHORT MIRROR (trader-entry says "Long side only. v2 plans longs only. If the user wants a short, say that." — the operator wants BOTH directions): apply every long rule verbatim, mirrored on the short side. ORB: SELL = the first completed bar after the range that CLOSES strictly below the range low. break20: SELL = a closed bar below the lowest low of the previous 20 closed bars. flag: bear flag = a directional push (>=1.5% down over ~8 bars) then a consolidation (<0.8%) of the last ~4 bars inside that push; trigger = a closed bar beyond the consolidation edge. reclaim: SELL = the previous closed bar was above ema20_15m and the last closed bar closed below it. overbought_fade: rsi14_15m was above 70 within the last 3 closed bars and the last closed bar closed down. Everything else in the doctrine is unchanged.
+A2 SESSION (NYSE 9:30-15:55 ET is replaced by the 24/7 crypto UTC anchor): the opening range is the first three 15m bars of the UTC day (00:00-00:45 closes). "Flat by 15:55 / no overnight hold" is replaced by the engine's exit manager (breakeven, ATR trail, 24h TTL) — exits are engine-owned, not yours.
+A3 CHART SCALE (daily/5m stock bars become 15m BTC bars): the scanner's close-based setups run on 15m closes: break20 = last closed 15m bar beyond the high/low of the previous 20 closed 15m bars; bull/bear flag at intraday magnitude = a >=1.5% directional push over ~8 bars then a <0.8% consolidation of the last ~4 bars inside that push, confirmed by a closed bar beyond the consolidation edge. The word "session" everywhere means the UTC day.
+A4 SIZE MATH (replaces the budget share formula): "A stop too far away for your max loss is a plain refusal" is inverted by the operator's fixed-stake directive: the distance is computed FROM the fixed $2 stake (engine-side). There is therefore never a size-based refusal; if the bars present a trigger, output it.
+A5 NEWS (trader-news runs on your Google Search grounding tool when you choose to use it): headlines are leads, not facts; filings beat headlines; never act on a headline alone. News NEVER creates a verdict by itself — only the closed-bar trigger doctrine does. A fresh big move with no headline is still just data: report it in the reason.
+A6 1h EMA50 (scanner context): context only, mild with-trend preference, never a veto.
+
+==================== STATUS VOCABULARY (verbatim semantics) ====================
+- "waiting": the level stands and no closed bar has gone beyond it yet. action=HOLD, valid_minutes=0; the reason states how far the last close is from the level.
+- "triggered": the LAST closed bar CLOSED strictly beyond the level (a close exactly AT the level is not beyond it). action=BUY (or the A1 mirror SELL), confidence 0.5-1.0, valid_minutes = 10 (execution window until the next cycle), trigger_price = that bar's close, setup = the matched rule name.
+- "expired": (i) the setup's one trigger per UTC day is already consumed (its first qualifying close happened earlier today), or (ii) the confirming bar is more than one bar old and the newest closed bar does not re-confirm it (a late entry is a different trade). action=HOLD, valid_minutes=0.
+
+HOLD is correct ONLY under waiting/expired (or when literally no setup matches). Never sit out a fresh closed-bar trigger.
 
 Return STRICT JSON ONLY (no markdown fences, no prose):
-{"action":"BUY|SELL|HOLD","status":"waiting|triggered|expired","confidence":<0.0-1.0>,"valid_minutes":<int>,"setup":"orb|flag|break20|reclaim|oversold_bounce|overbought_fade|none","trigger_price":<number>,"reason":"<=200 chars","trend_1h":"up|down|range"}
+{"action":"BUY|SELL|HOLD","status":"waiting|triggered|expired","confidence":<0.0-1.0>,"valid_minutes":<int>,"setup":"orb|flag|break20|reclaim|oversold_bounce|overbought_fade|none","trigger_price":<number>,"reason":"<=200 chars, fact language","trend_1h":"up|down|range"}
 """
 
 
@@ -403,86 +473,139 @@ class GeminiScanner:
         Each candidate gets exactly one counted attempt with the current
         rotation slot; the next candidate in the same cycle picks up the
         following slot. The first successful verdict wins; the model that
-        produced it is returned for transparent telemetry.
+        produced it is returned for transparent telemetry. Bounded
+        transient recovery (operator directive: FIX gemini-3.8-flash
+        demand 503s / read-timeouts, do not abandon them): if the whole
+        chain failed on transient errors only, ONE extra round runs after
+        a 12s pause.
         """
         candidates = [self.s.gemini_model] + list(self.s.gemini_fallback_models)
         last_exc: Optional[Exception] = None
-        for model in candidates:
-            key_idx = self.rot.begin_call()
-            try:
-                verdict = await self._call_model(model, key_idx, features)
-            except Exception as exc:  # noqa: BLE001 — descend to next model
-                last_exc = exc
-                continue
-            return verdict, model, key_idx
+        for round_no in (1, 2):
+            if round_no == 2:
+                if last_exc is None or not _is_transient(last_exc):
+                    break
+                await asyncio.sleep(12)
+            for model in candidates:
+                key_idx = self.rot.begin_call()
+                try:
+                    verdict = await self._call_model(model, key_idx, features)
+                except Exception as exc:  # noqa: BLE001 — descend / retry
+                    last_exc = exc
+                    if not _is_transient(exc):
+                        break       # permanent: further attempts are pointless
+                    continue
+                return verdict, model, key_idx
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("no gemini candidates configured")
 
     async def _call_model(self, model: str, key_idx: int,
                           features: Dict[str, Any]) -> Dict[str, Any]:
-        """One counted attempt (candidate model + current rotation key).
+        """One counted attempt (candidate model + current rotation slot).
 
-        The rotation slot is consumed on every exit path (transport error,
-        HTTP error, malformed envelope, unparseable verdict, success) —
-        a failure never triggers a retry on the same slot (no request
-        amplification); the slot the next attempt picks reflects exactly
-        the sequential 5-key rotation matrix.
+        Request shapes, in operator priority order:
+          1. shape 'gs'   — HIGH THINKING + GOOGLE SEARCH grounding: the
+             operator explicitly requires "high thinking" and internet
+             access. A grounded response cannot also use a strict JSON
+             response-mime, so the verdict is parsed out of free text.
+          2. shape 'json' — HIGH THINKING + strict JSON (no tools,
+             responseMimeType application/json) as the shape-2 fallback.
+
+        Each shape gets up to two attempts: on a transient failure
+        (HTTP 429/5xx or a transport timeout) the SAME shape retries
+        once after ~6s. A permanent failure (400/403, envelope, empty
+        text) moves straight to the next shape. The rotation slot is
+        consumed exactly once for the whole outcome; ai_state records
+        it once with the shape detail path.
         """
         headers = {
             "x-goog-api-key": self.s.gemini_api_keys[key_idx],
             "Content-Type": "application/json",
         }
-        payload = {
-            "contents": [{"role": "user",
-                          "parts": [{"text": json.dumps(features, separators=(",", ":"))}]}],
-            "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
-            "generationConfig": {
-                "temperature": 0.2, "maxOutputTokens": 2048,
-                "responseMimeType": "application/json",
-            },
+        gen: Dict[str, Any] = {
+            "temperature": 0.2, "maxOutputTokens": 32768,
+            "thinkingConfig": {"thinkingLevel": "high"},
         }
+        shapes = (
+            ("gs", {"tools": [{"google_search": {}}]}),
+            ("json", {}),
+        )
         url = f"{_GEMINI_URL}/{model}:generateContent"
-        try:
-            async with httpx.AsyncClient(timeout=self.s.ai_call_timeout_seconds) as cli:
-                resp = await cli.post(url, json=payload, headers=headers)
-        except Exception as exc:  # transport failure — slot consumed, no retry
-            self.rot.advance_after_call()
-            self.rot.record(ok=False, model=model, key=key_idx + 1,
-                            error=f"transport {type(exc).__name__}")
-            raise
-        if resp.status_code != 200:
-            self.rot.advance_after_call()
-            self.rot.record(ok=False, model=model, key=key_idx + 1,
-                            error=f"HTTP {resp.status_code}: {resp.text[:160]}")
-            raise RuntimeError(
-                f"Gemini HTTP {resp.status_code}: {resp.text[:200]}")
-        try:
-            body = resp.json()
-            cand0 = body["candidates"][0]
-            text = cand0["content"]["parts"][0]["text"]
-            finish = str(cand0.get("finishReason", ""))
-        except (KeyError, IndexError, ValueError) as exc:
-            self.rot.advance_after_call()
-            self.rot.record(ok=False, model=model, key=key_idx + 1,
-                            error="malformed envelope")
-            raise RuntimeError("gemini response missing candidate text") from exc
-        if not str(text or "").strip():
-            self.rot.advance_after_call()
-            self.rot.record(ok=False, model=model, key=key_idx + 1,
-                            error=f"empty text finish={finish}")
-            raise RuntimeError(f"gemini empty text (finish={finish})")
-        verdict = self._parse_verdict(text)
-        if verdict is None:
-            self.rot.advance_after_call()
-            self.rot.record(ok=False, model=model, key=key_idx + 1,
-                            error=f"unparseable verdict (finish={finish}): {text[:140]!r}")
-            raise RuntimeError(f"gemini verdict not JSON: {text[:160]}")
+        details: List[str] = []
+        for shape, extra in shapes:
+            gen_cfg = dict(gen)
+            if shape == "json":
+                gen_cfg["responseMimeType"] = "application/json"
+            payload = {
+                "contents": [{"role": "user",
+                              "parts": [{"text": json.dumps(features, separators=(",", ":"))}]}],
+                "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
+                "generationConfig": gen_cfg,
+                **extra,
+            }
+            for attempt in (1, 2):
+                if attempt == 2:
+                    await asyncio.sleep(6)
+                try:
+                    async with httpx.AsyncClient(
+                            timeout=self.s.ai_call_timeout_seconds) as cli:
+                        resp = await cli.post(url, json=payload, headers=headers)
+                except Exception as exc:  # transport (timeout / network)
+                    tag = f"{shape}.a{attempt}:{type(exc).__name__}"
+                    details.append(tag)
+                    if attempt < 2 and _transient_tag(tag):
+                        continue        # retry the same shape after the 6s pause
+                    break               # move to the next shape
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    tag = f"{shape}.a{attempt}:HTTP{resp.status_code}"
+                    details.append(tag)
+                    if attempt < 2:
+                        continue        # retry the same shape after the 6s pause
+                    break
+                if resp.status_code != 200:
+                    details.append(f"{shape}.a{attempt}:HTTP{resp.status_code}")
+                    break               # permanent — straight to the next shape
+                try:
+                    body = resp.json()
+                    cands = body.get("candidates") or []
+                    if not cands:
+                        details.append(f"{shape}.a{attempt}:no-candidates")
+                        break
+                    cand0 = cands[0]
+                    finish = str(cand0.get("finishReason", ""))
+                    parts = (cand0.get("content") or {}).get("parts") or []
+                    # grounded + thinking responses interleave thought-only
+                    # parts before the answer; join answer parts only.
+                    texts = [p.get("text", "") for p in parts
+                             if isinstance(p, dict) and not p.get("thought")]
+                    text = "\n".join(t for t in texts if t and t.strip()).strip()
+                except (ValueError, AttributeError, KeyError, IndexError) as exc:
+                    details.append(f"{shape}.a{attempt}:envelope-{type(exc).__name__}")
+                    break
+                if not text:
+                    details.append(f"{shape}.a{attempt}:empty-text finish={finish}")
+                    break
+                verdict = self._parse_verdict(text)
+                if verdict is None:
+                    details.append(
+                        f"{shape}.a{attempt}:unparseable finish={finish} {text[:80]!r}")
+                    break
+                self.rot.advance_after_call()
+                trail = ",".join(details)
+                self.rot.record(ok=True, model=model, key=key_idx + 1,
+                                action=verdict.get("action"),
+                                status=verdict.get("status"),
+                                conf=verdict.get("confidence"),
+                                setup=verdict.get("setup"),
+                                error=f"shape={shape} tries={attempt}"
+                                      + (f" after [{trail}]" if trail else ""))
+                return verdict
         self.rot.advance_after_call()
-        self.rot.record(ok=True, model=model, key=key_idx + 1,
-                        action=verdict.get("action"), status=verdict.get("status"),
-                        conf=verdict.get("confidence"), setup=verdict.get("setup"))
-        return verdict
+        self.rot.record(ok=False, model=model, key=key_idx + 1,
+                        error="3.8 all-shapes-failed: " + ";".join(details))
+        raise RuntimeError(
+            f"gemini all request shapes failed: {';'.join(details)}")
 
     @staticmethod
     def _parse_verdict(text: str) -> Optional[Dict[str, Any]]:
