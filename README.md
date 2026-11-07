@@ -25,15 +25,19 @@ tools/
                             UptimeRobot keep-alive monitor
 ```
 
-**Operator mode (2026-11-06):** the AI verdict executes directly — no risk gates,
-no cooldowns, no loss limits. Operator rules: (1) execution never happens at a
-price more than $1 away from the AI decision price (Limit-IOC caps; drift
-beyond the cap expires the order with zero exposure); (2) every trade stakes a
-FIXED ±$1 — the exchange-minimum quantity with a stop that nets ≈ −$1 and a
-target that nets ≈ +$1 (fees included; a 1.5×ATR noise floor may widen the
-realized loss modestly in unusually volatile markets). The decision prompt is
-decisive: BUY/SELL the moment a confirmed closed-bar setup matches; HOLD only
-when literally no setup matches.
+**Operator mode (2026-11-06, rev2 2026-11-07):** the AI verdict executes directly — no risk gates,
+no cooldowns, no loss limits (the old G0-G9 are deleted). Operator rules: (1) execution never happens
+at a price more than $1 away from the AI decision price (Limit-IOC caps; drift beyond the cap expires
+the order with zero exposure); (2) every trade stakes a FIXED ±$2 — the exchange-minimum quantity with
+a stop that nets ≈ −$2 and a target that nets ≈ +$2 (fees included; a 1.5×ATR noise floor may widen
+the realized loss modestly in unusually volatile markets). The decision head is bound EXACTLY and IN
+DETAIL to the day-trader-skill playbook (github.com/Jakeschincariol/day-trader-skill): scanner/entry/
+exit/budget/news doctrine quoted verbatim in the system prompt, with A1-A6 mechanical adaptations
+documented in place (short-side mirror, UTC-day quarter-hour anchors, fixed-stake inversion of the
+budget size formula, Google-Search-grounded news role, standing-yes execution authorization).
+Model discipline: gemini-3.8-flash ONLY, thinkingLevel=high as the first request shape together with
+the google_search tool; a same-thinking strict-JSON shape backs it; transient 429/5xx/timeout get one
+same-shape retry after ~6s and one extra whole-chain round after ~12s.
 
 ## Local run
 
