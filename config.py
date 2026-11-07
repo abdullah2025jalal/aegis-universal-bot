@@ -134,6 +134,22 @@ class Settings:
                                                           # ≈$2 after fees, target gains ≈$2)
 
     # ------------------------------------------------------------------
+    # AI platform (operator directive 2026-11-07): OpenRouter with the
+    # glm-5.3-flash free model and a TWO-key 5-hour wave rotation.
+    # "gemini" stays as the legacy platform path and is selected only by
+    # AI_PLATFORM=gemini — the engine default is openrouter now.
+    # ------------------------------------------------------------------
+    ai_platform: str = "openrouter"                       # "openrouter" | "gemini"(legacy)
+    openrouter_model: str = "z-ai/glm-5.3-flash"          # :free variant retired by
+                                                          # OpenRouter (404 — documented
+                                                          # below); paid slug is the same
+                                                          # model and works on 0 credits
+    openrouter_api_keys: List[str] = field(default_factory=list)
+    ai_key_window_seconds: int = 5 * 3600                 # each key owns the feed for a 5-hour
+                                                          # wave (~1 request / 15 min), then the
+                                                          # other key takes over for its wave
+
+    # ------------------------------------------------------------------
     # Error telemetry anti-spam
     # ------------------------------------------------------------------
     error_dedupe_window_seconds: int = 900                # 15 minutes
@@ -189,6 +205,12 @@ class Settings:
             ai_state_path=_env_str("AI_STATE_PATH", "ai_state.json") or "ai_state.json",
             ai_max_price_deviation_usd=_env_float("AI_MAX_PRICE_DEVIATION_USD", 1.0),
             fixed_risk_per_trade_usd=_env_float("FIXED_RISK_PER_TRADE_USD", 2.0),
+            ai_platform=(_env_str("AI_PLATFORM", "openrouter") or "openrouter").strip().lower(),
+            openrouter_model=_env_str("OPENROUTER_MODEL", "z-ai/glm-5.3-flash") or "z-ai/glm-5.3-flash",
+            openrouter_api_keys=[
+                k.strip() for k in _env_str("OPENROUTER_API_KEYS").replace("\n", ",").split(",")
+                if k.strip()],
+            ai_key_window_seconds=_env_int("AI_KEY_WINDOW_SECONDS", 5 * 3600),
         )
         return s
 

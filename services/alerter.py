@@ -460,7 +460,8 @@ class Alerter:
              f"${float(ctx.get('bid') or 0):,.1f} / ${float(ctx.get('ask') or 0):,.1f}"),
             ("Last Price", f"${float(ctx.get('last_price') or 0):,.1f}"),
             ("Model / Key / Call#", (
-                f"{ctx.get('model')} · key#{ctx.get('key')}/5 · call#{ctx.get('call')}")),
+                f"{ctx.get('model')} · key#{ctx.get('key')}/{ctx.get('key_total', 5)} "
+                f"· call#{ctx.get('call')}")),
             ("AI Latency", f"{ctx.get('latency_ms', '?')} ms"),
             ("Execution (direct, zero-drift IOC)", str(ctx.get("execution", "n/a"))),
             ("Equity", f"${float(ctx.get('equity') or 0):.2f} USDT"),

@@ -46,6 +46,24 @@ Key & model rotation (AI Studio free tier survival matrix, user-specified):
   and surfaced in the consensus/status reports. The reconciler boot
   drill also counts as one real call.
 
+ Platform switch (OPERATOR DIRECTIVE 2026-11-07 — ACTIVE):
+   the decision feed moved from Google AI Studio to OPENROUTER with the
+   Z.ai model glm-5.3-flash (exact slug z-ai/glm-5.3-flash), applying
+   the SAME day-trader-skill playbook verbatim (_SYSTEM_PROMPT is
+   byte-identical for both platforms). Note: OpenRouter retired the
+   :free glm-5.3-flash variant (404 "availability"); the paid slug is
+   the same model and currently serves free-tier accounts at 0 credits
+   (spend tracked as account usage). Two OpenRouter accounts protect
+   the daily request quota with a WALL-CLOCK WAVE rotation:
+     key#1 owns the feed — one request per 15-minute cycle — for a
+     5-hour wave (≈20 requests), then key#2 owns the feed for its own
+     5-hour wave, then back to key#1, forever. The wave schedule is
+     persisted in ai_state.json (or_key_index / or_window_started /
+     or_calls) so reboots continue the running wave instead of
+     restarting it. Bounded transient recovery is identical to the
+     Gemini path (one in-shape retry, then the honest chain-down email;
+     no model fallback chain for the new platform).
+
 Latency: end-to-end decision latency (data -> verdict, ms) is measured,
 persisted and surfaced on the status reports; the model additionally
 returns valid_minutes — the trigger validity window ("a late entry is a
@@ -191,24 +209,41 @@ def _ema(values: List[float], period: int) -> List[float]:
 
 
 class _RotationState:
-    """dat-file persistence for the 5-key sequential rotation engine."""
+    """JSON persistence for the key rotation engine (platform-aware).
+
+    gemini (legacy):   5 keys x AI_CALLS_PER_KEY sequential slots.
+    openrouter (active): TWO keys in 5-hour WALL-CLOCK waves — the active
+    key serves every 15-minute cycle for ai_key_window_seconds, then the
+    next key takes over. Wave schedule persists across reboots.
+    """
 
     def __init__(self, settings) -> None:
         self.path = settings.ai_state_path
+        self.platform = getattr(settings, "ai_platform", "gemini")
         self.calls_per_key = max(1, settings.ai_calls_per_key)
-        self.keys = list(settings.gemini_api_keys)
+        self.window_seconds = max(1, getattr(settings, "ai_key_window_seconds",
+                                             5 * 3600))
+        self.keys = (list(settings.openrouter_api_keys)
+                     if self.platform == "openrouter"
+                     else list(settings.gemini_api_keys))
         parent = os.path.dirname(os.path.abspath(self.path))
         if parent:
             os.makedirs(parent, exist_ok=True)
+        self.d_model = (settings.openrouter_model
+                        if self.platform == "openrouter"
+                        else settings.gemini_model)
         self.d: Dict[str, Any] = {
             "counter_total": 0, "key_index": 0, "calls_current": 0,
-            "model": settings.gemini_model, "updated_ts": 0.0, "history": [],
+            "or_key_index": 0, "or_window_started": None, "or_calls": 0,
+            "model": self.d_model,
+            "updated_ts": 0.0, "history": [],
         }
         if os.path.exists(self.path):
             try:
                 with open(self.path, "r", encoding="utf-8") as fh:
                     stored = json.load(fh)
                 self.d.update({k: v for k, v in stored.items() if k in self.d})
+                self.d["model"] = self.d_model            # platform-accurate model
             except (OSError, ValueError, TypeError):
                 logger.warning("ai_state.json unreadable — rotation restarts at key#1")
         self._save()
@@ -221,7 +256,7 @@ class _RotationState:
         os.replace(tmp, self.path)
 
     def begin_call(self) -> int:
-        """Reserve the current key slot for this request attempt."""
+        """Reserve the current key slot for this request attempt (gemini)."""
         return self.d["key_index"] % max(1, len(self.keys))
 
     def advance_after_call(self) -> None:
@@ -233,9 +268,43 @@ class _RotationState:
             self.d["calls_current"] = 0
         self._save()
 
+    def begin_window_call(self) -> int:
+        """Reserve ONE request on the ACTIVE wave key (openrouter).
+
+        The key serves one request per 15-minute cycle; after
+        ai_key_window_seconds (5 hours ≈ 20 requests) the next key owns
+        the feed for its own wave, and the cycle repeats forever. The
+        window is wall-clock, so failed cycles never extend a key's
+        wave and reboots continue the already-running window.
+        """
+        now = time.time()
+        if not self.d["or_window_started"]:
+            self.d["or_window_started"] = now          # first request of key#1
+        elif now - self.d["or_window_started"] >= self.window_seconds:
+            self.d["or_key_index"] = (
+                (self.d["or_key_index"] + 1) % max(1, len(self.keys)))
+            self.d["or_window_started"] = now
+            self.d["or_calls"] = 0
+        idx = self.d["or_key_index"] % max(1, len(self.keys))
+        self.d["or_calls"] += 1
+        self.d["counter_total"] += 1
+        self._save()
+        return idx
+
     def record(self, **kv: Any) -> None:
         self.d["history"] = [{"ts": round(time.time(), 1), **kv}] + self.d["history"]
         self.d["history"] = self.d["history"][:20]
+        self._save()
+
+    def force_flip(self) -> None:
+        """Immediately hand the feed to the NEXT key (insufficient-credit
+        failover 402). The wave clock restarts for the new owner; if both
+        keys are drained the normal chain-down email reports it."""
+        if len(self.keys) >= 1:
+            self.d["or_key_index"] = (
+                (self.d["or_key_index"] + 1) % max(1, len(self.keys)))
+        self.d["or_window_started"] = time.time()
+        self.d["or_calls"] = 0
         self._save()
 
 
@@ -249,7 +318,11 @@ class GeminiScanner:
         self.s = settings
         self.on_setup = on_setup
         self.shared_account = shared  # operator-facing account snapshot (equity/position)
-        if not settings.gemini_api_keys:
+        if self.s.ai_platform == "openrouter":
+            if not self.s.openrouter_api_keys:
+                raise RuntimeError(
+                    "AI_PLATFORM=openrouter but OPENROUTER_API_KEYS is empty")
+        elif not self.s.gemini_api_keys:
             raise RuntimeError("GEMINI_FEED enabled but GEMINI_API_KEYS is empty")
         self.rot = _RotationState(settings)
         self._task: Optional[asyncio.Task] = None
@@ -314,7 +387,12 @@ class GeminiScanner:
         ctx = await self._collect()
         t0 = time.time()
         try:
-            verdict, model_used, key_idx = await self._ask_gemini(ctx["features"])
+            if self.s.ai_platform == "openrouter":
+                verdict, model_used, key_idx = await self._ask_openrouter(
+                    ctx["features"])
+            else:
+                verdict, model_used, key_idx = await self._ask_gemini(
+                    ctx["features"])
         except Exception as exc:  # noqa: BLE001 — whole chain down: the cycle
             # EMAILS ANYWAY (operator directive: alerts first-to-first every
             # 15 minutes). Honest synthetic status, no execution, no retry
@@ -341,7 +419,9 @@ class GeminiScanner:
             f"AI={action} {status.lower()} conf={verdict.get('confidence')} "
             f"setup={verdict.get('setup')} valid={verdict.get('valid_minutes')}m "
             f"1h={verdict.get('trend_1h')} lat={round(ai_ms)}ms "
-            f"model={model_used} key#{key_idx + 1}/5 call#{self.rot.d['counter_total']}")
+            f"model={self._display_model(model_used)} "
+            f"key#{key_idx + 1}/{max(len(self.rot.keys), 1)} "
+            f"call#{self.rot.d['counter_total']}")
         self.shared["last_scan_ts"] = time.time()
         self.shared["error"] = ""
 
@@ -369,7 +449,9 @@ class GeminiScanner:
             "reason": str(verdict.get("reason", ""))[:200],
             "trigger_price": verdict.get("trigger_price"),
             "avg_price": verdict.get("avg_price"),
-            "model": model_used, "key": key_idx + 1,
+            "model": self._display_model(model_used),
+            "key": key_idx + 1,
+            "key_total": max(len(self.rot.keys), 1),
             "slot": self.rot.d["calls_current"], "call": self.rot.d["counter_total"],
             "latency_ms": round(ai_ms),
             "last_price": ctx["last_price"], "bid": ctx["entry_bid"], "ask": ctx["entry_ask"],
@@ -606,6 +688,156 @@ class GeminiScanner:
                         error="3.8 all-shapes-failed: " + ";".join(details))
         raise RuntimeError(
             f"gemini all request shapes failed: {';'.join(details)}")
+
+    # ------------------------------------------------------------------
+    # OpenRouter call (chat completions) — ACTIVE platform per the
+    # operator directive 2026-11-07. Single model (z-ai/glm-5.3-flash:
+    # free — glm-5.3-flash on the free endpoint), no fallback chain; the
+    # 5-hour key wave lives in _RotationState.begin_window_call.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _display_model(model: str) -> str:
+        """Compact operator-facing model name (z-ai/glm-5.3-flash:free ->
+        glm-5.3-flash); identity for any other string."""
+        return str(model).replace("z-ai/", "").replace(":free", "")
+
+    async def _ask_openrouter(
+            self, features: Dict[str, Any]) -> Tuple[Dict[str, Any], str, int]:
+        """One decision per cycle on the ACTIVE wave key (OpenRouter).
+
+        Wall-clock wave (operator directive): key#1 serves every
+        15-minute cycle for a 5-hour wave (~20 requests), then key#2
+        serves its own wave, then back to key#1 — never exhausting the
+        free daily request quota of either account. Bounded transient
+        recovery mirrors the Gemini path: the whole cycle gets ONE extra
+        round after a 12s pause when the first round failed transiently
+        (429/5xx/transport timeout); permanent failures (400/403,
+        envelope) fail fast into the honest chain-down email.
+        """
+        model = self.s.openrouter_model
+        last_exc: Optional[Exception] = None
+        for round_no in (1, 2):
+            if round_no == 2:
+                if last_exc is None or not _is_transient(last_exc):
+                    break
+                await asyncio.sleep(12)
+            key_idx = self.rot.begin_window_call()
+            try:
+                verdict = await self._call_openrouter(model, key_idx, features)
+            except Exception as exc:  # noqa: BLE001 — bounded retry
+                last_exc = exc
+                if "HTTP402" in str(exc):
+                    # insufficient credit: hand the feed to the other key
+                    # immediately — the wave clock restarts for its owner
+                    self.rot.force_flip()
+                    break
+                if not _is_transient(exc):
+                    break       # permanent: further attempts are pointless
+                continue
+            return verdict, model, key_idx
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("no openrouter candidates configured")
+
+    async def _call_openrouter(self, model: str, key_idx: int,
+                               features: Dict[str, Any]) -> Dict[str, Any]:
+        """One OpenRouter chat-completion request (strict JSON verdict out).
+
+        Request shapes, in priority order (the skill prompt and verdict
+        parsing are IDENTICAL in every shape; later shapes are mechanical
+        fallbacks in case the free route rejects a parameter):
+          1. shape 'json'  — reasoning effort high (hidden) + strict
+             response_format json_object
+          2. shape 'text'  — reasoning effort high (hidden), plain text
+          3. shape 'plain' — no thinking params at all (provider-safe)
+
+        Per shape: one attempt; a transient failure (HTTP 429/5xx or a
+        transport timeout) retries the SAME shape once after ~6s; a
+        permanent failure moves straight to the next shape. The rotation
+        wave slot was reserved ONCE by begin_window_call for the whole
+        logical request; ai_state records the outcome once.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.s.openrouter_api_keys[key_idx]}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://aegis-universal.local",
+            "X-Title": "Aegis-Universal",
+        }
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user",
+             "content": json.dumps(features, separators=(",", ":"))},
+        ]
+        base: Dict[str, Any] = {
+            "model": model, "messages": messages,
+            "temperature": 0.2, "max_tokens": 3000,
+        }
+        shapes: List[Tuple[str, Dict[str, Any]]] = [
+            ("json", {"response_format": {"type": "json_object"},
+                      "reasoning": {"effort": "high", "exclude": True}}),
+            ("text", {"reasoning": {"effort": "high", "exclude": True}}),
+            ("plain", {}),
+        ]
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        details: List[str] = []
+        for shape, extra in shapes:
+            payload = dict(base)
+            payload.update(extra)
+            for attempt in (1, 2):
+                if attempt == 2:
+                    await asyncio.sleep(6)
+                try:
+                    async with httpx.AsyncClient(
+                            timeout=self.s.ai_call_timeout_seconds) as cli:
+                        resp = await cli.post(url, json=payload, headers=headers)
+                except Exception as exc:  # transport (timeout / network)
+                    tag = f"{shape}.a{attempt}:{type(exc).__name__}"
+                    details.append(tag)
+                    if attempt < 2 and _transient_tag(tag):
+                        continue        # retry the same shape after the 6s pause
+                    break               # move to the next shape
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    tag = f"{shape}.a{attempt}:HTTP{resp.status_code}"
+                    details.append(tag)
+                    if attempt < 2:
+                        continue        # retry the same shape after the 6s pause
+                    break
+                if resp.status_code != 200:
+                    details.append(f"{shape}.a{attempt}:HTTP{resp.status_code}")
+                    break               # permanent — straight to the next shape
+                try:
+                    body = resp.json()
+                    choice = (body.get("choices") or [None])[0] or {}
+                    msg = choice.get("message") or {}
+                    finish = str(choice.get("finish_reason", ""))
+                    text = str(msg.get("content") or "").strip()
+                except (ValueError, AttributeError, KeyError, IndexError) as exc:
+                    details.append(
+                        f"{shape}.a{attempt}:envelope-{type(exc).__name__}")
+                    break
+                if not text:
+                    details.append(
+                        f"{shape}.a{attempt}:empty-text finish={finish}")
+                    break
+                verdict = self._parse_verdict(text)
+                if verdict is None:
+                    details.append(
+                        f"{shape}.a{attempt}:unparseable finish={finish} {text[:80]!r}")
+                    break
+                trail = ",".join(details)
+                self.rot.record(ok=True, model=model, key=key_idx + 1,
+                                action=verdict.get("action"),
+                                status=verdict.get("status"),
+                                conf=verdict.get("confidence"),
+                                setup=verdict.get("setup"),
+                                error=f"glm(shape={shape} tries={attempt})"
+                                      + (f" after [{trail}]" if trail else ""))
+                return verdict
+        self.rot.record(ok=False, model=model, key=key_idx + 1,
+                        error="glm all-shapes-failed: " + ";".join(details))
+        raise RuntimeError(
+            f"openrouter all request shapes failed: {';'.join(details)}")
 
     @staticmethod
     def _parse_verdict(text: str) -> Optional[Dict[str, Any]]:
